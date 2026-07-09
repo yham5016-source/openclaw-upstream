@@ -1515,6 +1515,20 @@ describe("doctor health contributions", () => {
     );
   });
 
+  it("wires Claw state diagnostics into doctor contributions", async () => {
+    vi.stubEnv("OPENCLAW_EXPERIMENTAL_CLAWS", "1");
+    const contributionChecks = await resolveDoctorContributionHealthChecks();
+
+    expect(contributionChecks.map((check) => check.id)).toContain("core/doctor/claws-state");
+  });
+
+  it("omits Claw doctor contributions without the experiment", () => {
+    vi.stubEnv("OPENCLAW_EXPERIMENTAL_CLAWS", "");
+    expect(resolveDoctorHealthContributions().map((entry) => entry.id)).not.toContain(
+      "doctor:claws-state",
+    );
+  });
+
   it("keeps implemented core health checks owned by ordered doctor contributions", async () => {
     const coreIds = CORE_HEALTH_CHECKS.map((check) => check.id);
     const contributionIds = resolveDoctorHealthContributions().flatMap(

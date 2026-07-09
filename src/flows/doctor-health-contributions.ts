@@ -1,6 +1,7 @@
 // Doctor health contribution helpers collect health checks from plugin manifests.
 import fs from "node:fs";
 import nodePath from "node:path";
+import { isExperimentalClawsEnabled } from "../claws/experimental.js";
 import type { probeGatewayMemoryStatus } from "../commands/doctor-gateway-health.js";
 import type { DoctorOptions, DoctorPrompter } from "../commands/doctor-prompter.js";
 import {
@@ -1502,6 +1503,10 @@ async function runSkillWorkshopToolPolicyHealth(ctx: DoctorHealthFlowContext): P
   await runCoreHealthFindingNote(ctx, "core/doctor/skill-workshop-tool-policy");
 }
 
+async function runClawStateHealth(ctx: DoctorHealthFlowContext): Promise<void> {
+  await runCoreHealthFindingNote(ctx, "core/doctor/claws-state");
+}
+
 export function resolveDoctorHealthContributions(): DoctorHealthContribution[] {
   return [
     createDoctorHealthContribution({
@@ -2038,6 +2043,16 @@ export function resolveDoctorHealthContributions(): DoctorHealthContribution[] {
       },
       run: runWorkspaceStatusHealth,
     }),
+    ...(isExperimentalClawsEnabled()
+      ? [
+          createDoctorHealthContribution({
+            id: "doctor:claws-state",
+            label: "Claws state",
+            healthCheckIds: ["core/doctor/claws-state"],
+            run: runClawStateHealth,
+          }),
+        ]
+      : []),
     createDoctorHealthContribution({
       id: "doctor:skill-curator",
       label: "Skill curator",
@@ -2193,8 +2208,8 @@ export function resolveDoctorHealthContributions(): DoctorHealthContribution[] {
 }
 
 export async function resolveDoctorContributionHealthChecks(): Promise<readonly HealthCheck[]> {
-  const { CORE_HEALTH_CHECKS } = await import("./doctor-core-checks.js");
-  const checksById = new Map(CORE_HEALTH_CHECKS.map((check) => [check.id, check]));
+  const { createCoreHealthChecks } = await import("./doctor-core-checks.js");
+  const checksById = new Map(createCoreHealthChecks().map((check) => [check.id, check]));
   const checks: HealthCheck[] = [];
   for (const contribution of resolveDoctorHealthContributions()) {
     if (contribution.healthChecks.length > 0) {

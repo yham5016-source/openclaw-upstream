@@ -1,6 +1,7 @@
 // Doctor core checks collect environment, config, and runtime readiness diagnostics.
 import path from "node:path";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { isExperimentalClawsEnabled } from "../claws/experimental.js";
 import {
   detectLegacyClawdBrowserProfileResidue,
   maybeArchiveLegacyClawdBrowserProfileResidue,
@@ -1131,6 +1132,21 @@ function createConvertedWorkflowChecks(
     createRuntimeToolSchemaCheck(deps),
     createWorkspaceSuggestionsCheck(deps),
     skillWorkshopToolPolicyCheck,
+    ...(isExperimentalClawsEnabled()
+      ? [
+          {
+            id: "core/doctor/claws-state",
+            kind: "core" as const,
+            description: "Claw lifecycle ownership and managed resources are consistent.",
+            defaultEnabled: false as const,
+            source: "doctor",
+            async detect(ctx: HealthCheckContext) {
+              const { collectClawStateHealthFindings } = await import("../claws/doctor.js");
+              return await collectClawStateHealthFindings({ cfg: ctx.cfg, env: process.env });
+            },
+          },
+        ]
+      : []),
   ];
 }
 

@@ -170,6 +170,20 @@ describe("CORE_HEALTH_CHECKS", () => {
     ).toBe(false);
   });
 
+  it("includes Claw state diagnostics in core doctor checks", () => {
+    vi.stubEnv("OPENCLAW_EXPERIMENTAL_CLAWS", "1");
+    expect(createCoreHealthChecks(createDeps()).map((check) => check.id)).toContain(
+      "core/doctor/claws-state",
+    );
+  });
+
+  it("omits Claw state diagnostics without the experiment", () => {
+    vi.stubEnv("OPENCLAW_EXPERIMENTAL_CLAWS", "");
+    expect(createCoreHealthChecks(createDeps()).map((check) => check.id)).not.toContain(
+      "core/doctor/claws-state",
+    );
+  });
+
   it("warns when autonomous Skill Workshop capture is enabled but policy hides its tool", async () => {
     const check = getCheck(
       createCoreHealthChecks(createDeps()),
