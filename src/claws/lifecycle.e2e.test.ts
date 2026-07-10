@@ -1,6 +1,6 @@
 // E2E coverage for experimental grouped Claw inspection and add planning.
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -266,17 +266,69 @@ describe("claws lifecycle cli e2e", () => {
     });
   });
 
-  it("blocks mutation when declared components need later lifecycle slices", async () => {
-    const result = await runOpenClaw(["claws", "add", manifestPath, "--yes", "--json"], {
-      expectFailure: true,
+  it("round-trips an owned MCP server through the real CLI lifecycle", async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), "openclaw-claw-mcp-source-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "openclaw-claw-mcp-state-"));
+    const source = join(sourceDir, "mcp-agent.claw.json");
+    await writeFile(
+      source,
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: { id: "mcp-agent" },
+        mcpServers: {
+          docs: {
+            command: "uvx",
+            args: ["docs-mcp"],
+            env: { DOCS_TOKEN: "${DOCS_TOKEN}" },
+          },
+        },
+      }),
+    );
+
+    const added = await runOpenClaw(["claws", "add", source, "--yes", "--json"], { stateDir });
+    expect(parseJson(added.stdout)).toMatchObject({
+      status: "complete",
+      mcpServers: [{ name: "docs", status: "complete" }],
+    });
+    expect(JSON.parse(await readFile(join(stateDir, "openclaw.json"), "utf8"))).toMatchObject({
+      mcp: {
+        servers: {
+          docs: {
+            command: "uvx",
+            args: ["docs-mcp"],
+            env: { DOCS_TOKEN: "${DOCS_TOKEN}" },
+          },
+        },
+      },
     });
 
-    expect(result.code).toBe(1);
-    expect(parseJson(result.stdout)).toMatchObject({
-      schemaVersion: "openclaw.clawAddResult.v1",
-      status: "failed",
-      error: { code: "unsupported_components" },
+    const status = await runOpenClaw(["claws", "status", "mcp-agent", "--json"], { stateDir });
+    expect(parseJson(status.stdout)).toMatchObject({
+      records: [{ mcpServers: [{ name: "docs", state: "present" }] }],
     });
+
+    const output = join(sourceDir, "exported");
+    const exported = await runOpenClaw(
+      ["claws", "export", "mcp-agent", "--out", output, "--json"],
+      { stateDir },
+    );
+    expect(parseJson(exported.stdout)).toMatchObject({
+      manifest: {
+        mcpServers: {
+          docs: { command: "uvx", env: { DOCS_TOKEN: "${DOCS_TOKEN}" } },
+        },
+      },
+    });
+
+    const removed = await runOpenClaw(["claws", "remove", "mcp-agent", "--yes", "--json"], {
+      stateDir,
+    });
+    expect(parseJson(removed.stdout)).toMatchObject({
+      status: "complete",
+      mcpServers: [{ name: "docs", action: "removed" }],
+    });
+    const finalConfig = JSON.parse(await readFile(join(stateDir, "openclaw.json"), "utf8"));
+    expect(finalConfig.mcp?.servers?.docs).toBeUndefined();
   });
 
   it("fails closed when add is invoked without dry-run or consent", async () => {

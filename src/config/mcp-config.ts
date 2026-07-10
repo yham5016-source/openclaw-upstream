@@ -1,4 +1,5 @@
 // Normalizes MCP server config for runtime launch and validation.
+import { stableStringify } from "../agents/stable-stringify.js";
 import { isRecord } from "../utils.js";
 import { readSourceConfigSnapshot } from "./io.js";
 import {
@@ -162,6 +163,7 @@ export async function updateConfiguredMcpServer(params: {
 export async function setConfiguredMcpServer(params: {
   name: string;
   server: unknown;
+  createOnly?: boolean;
 }): Promise<ConfigMcpWriteResult> {
   const name = params.name.trim();
   if (!name) {
@@ -174,6 +176,13 @@ export async function setConfiguredMcpServer(params: {
   const loaded = await listConfiguredMcpServers();
   if (!loaded.ok) {
     return loaded;
+  }
+  if (params.createOnly && Object.hasOwn(loaded.mcpServers, name)) {
+    return {
+      ok: false,
+      path: loaded.path,
+      error: `MCP server ${JSON.stringify(name)} already exists.`,
+    };
   }
 
   const next = structuredClone(loaded.config);
@@ -207,6 +216,7 @@ export async function setConfiguredMcpServer(params: {
 
 export async function unsetConfiguredMcpServer(params: {
   name: string;
+  expectedServer?: Record<string, unknown>;
 }): Promise<ConfigMcpWriteResult> {
   const name = params.name.trim();
   if (!name) {
@@ -224,6 +234,17 @@ export async function unsetConfiguredMcpServer(params: {
       config: loaded.config,
       mcpServers: loaded.mcpServers,
       removed: false,
+    };
+  }
+  if (
+    params.expectedServer &&
+    stableStringify(canonicalizeConfiguredMcpServer(loaded.mcpServers[name])) !==
+      stableStringify(canonicalizeConfiguredMcpServer(params.expectedServer))
+  ) {
+    return {
+      ok: false,
+      path: loaded.path,
+      error: `MCP server ${JSON.stringify(name)} changed and was not removed.`,
     };
   }
 

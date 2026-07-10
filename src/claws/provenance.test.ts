@@ -8,6 +8,7 @@ import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js
 import { applyClawAddPlan } from "./add.js";
 import { ClawCronInstallError } from "./cron.js";
 import { buildClawAddPlan } from "./lifecycle.js";
+import { ClawMcpInstallError } from "./mcp.js";
 import { ClawPackageInstallError } from "./packages.js";
 import {
   persistClawInstallRecord,
@@ -300,6 +301,43 @@ describe("applyClawAddPlan", () => {
       cronJobs: [{ manifestId: "daily-report", status: "failed" }],
       installRecord: { status: "partial" },
       error: { code: "cron_install_failed", message: "gateway unavailable" },
+    });
+  });
+
+  it("returns partial MCP ownership when config installation is uncertain", async () => {
+    const { root, plan } = await makePlan({
+      schemaVersion: 1,
+      agent: { id: "worker" },
+      mcpServers: { docs: { command: "uvx", env: { TOKEN: "${DOCS_TOKEN}" } } },
+    });
+    const pendingRef = {
+      schemaVersion: "openclaw.clawMcpServerRef.v1" as const,
+      agentId: "worker",
+      name: "docs",
+      configDigest: `sha256:${"a".repeat(64)}`,
+      status: "pending" as const,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    };
+
+    const result = await applyClawAddPlan(plan, {
+      env: stateEnv(root),
+      commitConfig: async (transform) => {
+        transform({});
+      },
+      installMcpServers: async () => {
+        throw new ClawMcpInstallError("mcp_install_uncertain", "write result unknown", [
+          pendingRef,
+        ]);
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "partial",
+      mcpServers: [{ name: "docs", status: "pending" }],
+      cronJobs: [],
+      installRecord: { status: "partial" },
+      error: { code: "mcp_install_uncertain", message: "write result unknown" },
     });
   });
 });

@@ -1,5 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
+import { normalizeConfiguredMcpServers } from "../config/mcp-config-normalize.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { root as fsSafeRoot } from "../infra/fs-safe.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db.js";
@@ -12,6 +13,7 @@ import {
   type ClawAgent,
   type ClawBootstrapFileName,
   type ClawManifest,
+  type ClawMcpServer,
 } from "./types.js";
 
 export const CLAW_EXPORT_RESULT_SCHEMA_VERSION = "openclaw.clawExportResult.v1" as const;
@@ -131,6 +133,21 @@ function exportedPackageName(record: ClawStatusResult["records"][number]): strin
     : `openclaw-claw-${record.install.agentId}`;
 }
 
+function portableMcpServer(server: Record<string, unknown>): ClawMcpServer {
+  return {
+    command: typeof server.command === "string" ? server.command : "",
+    ...(Array.isArray(server.args) ? { args: server.args as string[] } : {}),
+    ...(server.env && typeof server.env === "object"
+      ? { env: server.env as Record<string, string> }
+      : {}),
+    ...(server.toolFilter && typeof server.toolFilter === "object"
+      ? { toolFilter: server.toolFilter as ClawMcpServer["toolFilter"] }
+      : {}),
+    ...(typeof server.timeout === "number" ? { timeout: server.timeout } : {}),
+    ...(typeof server.connectTimeout === "number" ? { connectTimeout: server.connectTimeout } : {}),
+  };
+}
+
 export async function exportClawAgent(
   agentId: string,
   outputDirectory: string,
@@ -158,6 +175,15 @@ export async function exportClawAgent(
     throw new ClawExportError(
       "workspace_files_unavailable",
       `Cannot export unavailable managed files: ${unavailable.map((file) => file.path).join(", ")}.`,
+    );
+  }
+  const unavailableMcpServers = record.mcpServers.filter((server) => server.state !== "present");
+  if (unavailableMcpServers.length > 0) {
+    throw new ClawExportError(
+      "mcp_servers_unavailable",
+      `Cannot export MCP servers with unresolved ownership or drift: ${unavailableMcpServers
+        .map((server) => server.name)
+        .join(", ")}.`,
     );
   }
   const unresolvedCronJobs = record.cronJobs.filter(
@@ -193,6 +219,7 @@ export async function exportClawAgent(
       files.push({ source, path: file.path });
     }
   }
+  const configuredMcpServers = normalizeConfiguredMcpServers(options.config.mcp?.servers);
   const manifest: ClawManifest = {
     schemaVersion: CLAW_SCHEMA_VERSION,
     agent: portableAgent(agent),
@@ -202,7 +229,12 @@ export async function exportClawAgent(
       .toSorted((left, right) =>
         `${left.kind}:${left.ref}`.localeCompare(`${right.kind}:${right.ref}`),
       ),
-    mcpServers: {},
+    mcpServers: Object.fromEntries(
+      record.mcpServers.map((ref) => [
+        ref.name,
+        portableMcpServer(configuredMcpServers[ref.name]!),
+      ]),
+    ),
     cronJobs: record.cronJobs
       .map((cron) => cron.job)
       .toSorted((left, right) => left.id.localeCompare(right.id)),

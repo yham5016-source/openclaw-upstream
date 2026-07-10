@@ -7,6 +7,7 @@ import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js
 import { applyClawAddPlan } from "./add.js";
 import { exportClawAgent } from "./export.js";
 import { buildClawAddPlan } from "./lifecycle.js";
+import { installClawMcpServers } from "./mcp.js";
 import { persistClawPackageRef } from "./provenance.js";
 import { parseClawManifest } from "./schema.js";
 import type { ClawSourceIdentity } from "./types.js";
@@ -24,6 +25,13 @@ async function installedFixture() {
     workspace: {
       bootstrapFiles: { "SOUL.md": { source: "source/SOUL.md" } },
       files: [{ source: "source/reference/policy.md", path: "reference/policy.md" }],
+    },
+    mcpServers: {
+      docs: {
+        command: "uvx",
+        args: ["docs-mcp"],
+        env: { DOCS_TOKEN: "${DOCS_TOKEN}" },
+      },
     },
     cronJobs: [
       {
@@ -56,6 +64,14 @@ async function installedFixture() {
     commitConfig: async (transform) => {
       config = transform(config);
     },
+    installMcpServers: async (currentPlan, options) =>
+      await installClawMcpServers(currentPlan, {
+        ...options,
+        setMcpServer: async ({ name, server }) => {
+          config.mcp = { ...config.mcp, servers: { ...config.mcp?.servers, [name]: server } };
+          return { ok: true, path: "config", config, mcpServers: config.mcp.servers! };
+        },
+      }),
     cronGateway: { add: async () => ({ id: "scheduler-daily" }) },
   });
   persistClawPackageRef(
@@ -88,7 +104,13 @@ describe("exportClawAgent", () => {
           files: [{ source: "workspace/reference/policy.md", path: "reference/policy.md" }],
         },
         packages: [{ kind: "skill", source: "clawhub", ref: "@acme/triage", version: "2.0.0" }],
-        mcpServers: {},
+        mcpServers: {
+          docs: {
+            command: "uvx",
+            args: ["docs-mcp"],
+            env: { DOCS_TOKEN: "${DOCS_TOKEN}" },
+          },
+        },
         cronJobs: [
           {
             id: "daily-report",

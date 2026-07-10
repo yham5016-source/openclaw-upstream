@@ -259,7 +259,7 @@ export async function runClawsStatusCommand(
         `${record.install.agentId}: ${record.install.claw.name}@${record.install.claw.version} (${record.install.status})`,
       );
       runtime.log(
-        `  Agent: ${record.agentState}; files: ${record.workspaceFiles.length}; packages: ${record.packages.length}; cron: ${record.cronJobs.length}`,
+        `  Agent: ${record.agentState}; files: ${record.workspaceFiles.length}; packages: ${record.packages.length}; MCP: ${record.mcpServers.length}; cron: ${record.cronJobs.length}`,
       );
     }
   }
