@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   extractChangelogReleaseSections,
@@ -10,9 +12,20 @@ import {
   releaseNotesVersionForTag,
   verifyGithubReleaseNotes,
 } from "../../../../scripts/render-github-release-notes.mjs";
+import {
+  createTeamUniverseResolver,
+  isoSecond,
+  teamUniverseWindowQuery,
+} from "./lib/github-team-inventory.mjs";
+import {
+  assertCompleteReleaseSourceInventory,
+  buildReleaseSourceInventory,
+  canonicalGitEnvironment,
+} from "./lib/release-source-inventory.mjs";
 
 const repo = "openclaw/openclaw";
 const commitAssociationQueryBatchSize = 20;
+const githubApiRetryDelaysMs = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const excludedHandles = new Set(["openclaw", "clawsweeper", "claude", "codex", "steipete"]);
 const nonEditorialTypes = new Set([
   "build",
@@ -53,6 +66,75 @@ function fail(message) {
   throw new Error(message);
 }
 
+function fileSnapshot(path) {
+  try {
+    return { bytes: readFileSync(path), exists: true };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { bytes: Buffer.alloc(0), exists: false };
+    }
+    throw error;
+  }
+}
+
+function snapshotMatches(path, expected) {
+  const actual = fileSnapshot(path);
+  return actual.exists === expected.exists && actual.bytes.equals(expected.bytes);
+}
+
+function canonicalFilesystemPath(path) {
+  const absolutePath = resolvePath(path);
+  try {
+    return realpathSync.native(absolutePath).toLowerCase();
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+    return join(realpathSync.native(dirname(absolutePath)), basename(absolutePath)).toLowerCase();
+  }
+}
+
+export function commitOutputTransaction(outputs, { beforeCommit } = {}) {
+  const canonicalPaths = outputs.map((output) => canonicalFilesystemPath(output.path));
+  if (new Set(canonicalPaths).size !== canonicalPaths.length) {
+    fail("release output transaction paths must be unique");
+  }
+  const staged = [];
+  const committed = [];
+  try {
+    for (const output of outputs) {
+      const temporaryPath = `${output.path}.tmp-${process.pid}-${randomUUID()}`;
+      writeFileSync(temporaryPath, output.content, { flag: "wx" });
+      staged.push({ ...output, temporaryPath });
+    }
+    beforeCommit?.();
+    for (const output of outputs) {
+      if (!snapshotMatches(output.path, output.expected)) {
+        fail(`release output changed during verification: ${output.path}`);
+      }
+    }
+    for (const output of staged) {
+      renameSync(output.temporaryPath, output.path);
+      committed.push(output);
+    }
+  } catch (error) {
+    for (const output of committed.toReversed()) {
+      if (output.expected.exists) {
+        const restorePath = `${output.path}.restore-${process.pid}-${randomUUID()}`;
+        writeFileSync(restorePath, output.expected.bytes, { flag: "wx" });
+        renameSync(restorePath, output.path);
+      } else {
+        rmSync(output.path, { force: true });
+      }
+    }
+    throw error;
+  } finally {
+    for (const output of staged) {
+      rmSync(output.temporaryPath, { force: true });
+    }
+  }
+}
+
 function printUsage() {
   console.log(`Usage:
   node .agents/skills/openclaw-changelog-update/scripts/verify-release-notes.mjs \\
@@ -67,6 +149,21 @@ Options:
   --manifest <path>     Read or write the complete contribution record ledger.
   --seed-ref <ref>      Use an existing release section as editorial input.
   --shipped-ref <tag>   Exclude PRs already recorded by this shipped tag; repeatable.
+  --source-target <ref> Inventory cutoff; --target may be one final CHANGELOG-only child.
+  --max-changelog-tail <count>
+                        Maximum linear CHANGELOG-only commits after --source-target (default: 1).
+  --comparison-base main
+                        Reconcile the exact merged-main PR universe against the source inventory.
+  --provenance-ref <ref>
+                        Search this trusted ref for unique cherry-pick provenance; repeatable.
+  --provenance-pr <PR>:<full-SHA>
+                        Trust one exact trailer-linked patch as merged PR provenance; repeatable.
+  --provenance-pr-adapted <PR>:<origin-SHA>:<target-SHA>
+                        Trust one reviewed same-path conflict-resolved PR backport; repeatable.
+  --provenance-pr-integrated <PR>:<source-SHA>:<target-SHA>
+                        Bind one source in a reviewed adapted multi-source PR backport; repeatable.
+  --provenance-pr-partial <PR>:<source-SHA>:<target-SHA>
+                        Trust one reviewed strict-path-subset PR backport; repeatable.
   --write-ledger        Write the verified ledger back into CHANGELOG.md.
   --release-tag <tag>   GitHub release tag to compare; repeatable with --check-github.
   --check-github        Require each supplied GitHub release body to match.
@@ -78,9 +175,16 @@ function parseArgs(argv) {
   const options = {
     releaseTags: [],
     checkGithub: false,
+    comparisonBaseBranch: undefined,
     help: false,
     json: false,
     manifestPath: undefined,
+    maxSourceTailCommits: 1,
+    provenanceAdaptedPullRequests: [],
+    provenanceIntegratedPullRequests: [],
+    provenancePartialPullRequests: [],
+    provenancePullRequests: [],
+    provenanceRefs: [],
     seedRef: undefined,
     shippedRefs: [],
     writeLedger: false,
@@ -104,6 +208,14 @@ function parseArgs(argv) {
       arg === "--version" ||
       arg === "--release-tag" ||
       arg === "--shipped-ref" ||
+      arg === "--source-target" ||
+      arg === "--max-changelog-tail" ||
+      arg === "--comparison-base" ||
+      arg === "--provenance-ref" ||
+      arg === "--provenance-pr" ||
+      arg === "--provenance-pr-adapted" ||
+      arg === "--provenance-pr-integrated" ||
+      arg === "--provenance-pr-partial" ||
       arg === "--manifest" ||
       arg === "--seed-ref"
     ) {
@@ -115,6 +227,68 @@ function parseArgs(argv) {
         options.releaseTags.push(value);
       } else if (arg === "--shipped-ref") {
         options.shippedRefs.push(value);
+      } else if (arg === "--source-target") {
+        options.sourceTarget = value;
+      } else if (arg === "--max-changelog-tail") {
+        if (!/^\d+$/.test(value)) {
+          fail(`invalid --max-changelog-tail value: ${value}`);
+        }
+        options.maxSourceTailCommits = Number(value);
+        if (!Number.isSafeInteger(options.maxSourceTailCommits)) {
+          fail(`invalid --max-changelog-tail value: ${value}`);
+        }
+      } else if (arg === "--comparison-base") {
+        if (value !== "main") {
+          fail("--comparison-base must be main");
+        }
+        options.comparisonBaseBranch = value;
+      } else if (arg === "--provenance-ref") {
+        options.provenanceRefs.push(value);
+      } else if (arg === "--provenance-pr") {
+        const match = value.match(/^#?(?<number>\d+):(?<commit>[0-9a-f]{40})$/i);
+        if (!match?.groups || Number(match.groups.number) <= 0) {
+          fail(`invalid --provenance-pr value: ${value}`);
+        }
+        options.provenancePullRequests.push({
+          commitRef: match.groups.commit.toLowerCase(),
+          number: Number(match.groups.number),
+        });
+      } else if (arg === "--provenance-pr-adapted") {
+        const match = value.match(
+          /^#?(?<number>\d+):(?<origin>[0-9a-f]{40}):(?<target>[0-9a-f]{40})$/i,
+        );
+        if (!match?.groups || Number(match.groups.number) <= 0) {
+          fail(`invalid --provenance-pr-adapted value: ${value}`);
+        }
+        options.provenanceAdaptedPullRequests.push({
+          number: Number(match.groups.number),
+          originCommitRef: match.groups.origin.toLowerCase(),
+          targetCommitRef: match.groups.target.toLowerCase(),
+        });
+      } else if (arg === "--provenance-pr-integrated") {
+        const match = value.match(
+          /^#?(?<number>\d+):(?<source>[0-9a-f]{40}):(?<target>[0-9a-f]{40})$/i,
+        );
+        if (!match?.groups || Number(match.groups.number) <= 0) {
+          fail(`invalid --provenance-pr-integrated value: ${value}`);
+        }
+        options.provenanceIntegratedPullRequests.push({
+          number: Number(match.groups.number),
+          sourceCommitRef: match.groups.source.toLowerCase(),
+          targetCommitRef: match.groups.target.toLowerCase(),
+        });
+      } else if (arg === "--provenance-pr-partial") {
+        const match = value.match(
+          /^#?(?<number>\d+):(?<source>[0-9a-f]{40}):(?<target>[0-9a-f]{40})$/i,
+        );
+        if (!match?.groups || Number(match.groups.number) <= 0) {
+          fail(`invalid --provenance-pr-partial value: ${value}`);
+        }
+        options.provenancePartialPullRequests.push({
+          number: Number(match.groups.number),
+          sourceCommitRef: match.groups.source.toLowerCase(),
+          targetCommitRef: match.groups.target.toLowerCase(),
+        });
       } else if (arg === "--manifest") {
         options.manifestPath = value;
       } else if (arg === "--seed-ref") {
@@ -145,13 +319,99 @@ function parseArgs(argv) {
     fail("--shipped-ref values must be unique");
   }
   options.shippedRefs = options.shippedRefs.toSorted((a, b) => (a === b ? 0 : a < b ? -1 : 1));
+  const uniqueProvenanceRefs = new Set(options.provenanceRefs);
+  if (uniqueProvenanceRefs.size !== options.provenanceRefs.length) {
+    fail("--provenance-ref values must be unique");
+  }
+  options.provenanceRefs = options.provenanceRefs.toSorted((a, b) =>
+    a === b ? 0 : a < b ? -1 : 1,
+  );
+  const provenancePullRequestKeys = new Set(
+    options.provenancePullRequests.map((entry) => `${entry.number}:${entry.commitRef}`),
+  );
+  if (provenancePullRequestKeys.size !== options.provenancePullRequests.length) {
+    fail("--provenance-pr values must be unique");
+  }
+  options.provenancePullRequests = options.provenancePullRequests.toSorted(
+    (left, right) => left.number - right.number || left.commitRef.localeCompare(right.commitRef),
+  );
+  const adaptedKeys = new Set(
+    options.provenanceAdaptedPullRequests.map(
+      (entry) => `${entry.number}:${entry.originCommitRef}:${entry.targetCommitRef}`,
+    ),
+  );
+  if (adaptedKeys.size !== options.provenanceAdaptedPullRequests.length) {
+    fail("--provenance-pr-adapted values must be unique");
+  }
+  if (
+    new Set(options.provenanceAdaptedPullRequests.map((entry) => entry.targetCommitRef)).size !==
+    options.provenanceAdaptedPullRequests.length
+  ) {
+    fail("--provenance-pr-adapted target SHAs must be unique");
+  }
+  options.provenanceAdaptedPullRequests = options.provenanceAdaptedPullRequests.toSorted(
+    (left, right) =>
+      left.number - right.number ||
+      left.originCommitRef.localeCompare(right.originCommitRef) ||
+      left.targetCommitRef.localeCompare(right.targetCommitRef),
+  );
+  const integratedKeys = new Set(
+    options.provenanceIntegratedPullRequests.map(
+      (entry) => `${entry.number}:${entry.sourceCommitRef}:${entry.targetCommitRef}`,
+    ),
+  );
+  if (integratedKeys.size !== options.provenanceIntegratedPullRequests.length) {
+    fail("--provenance-pr-integrated values must be unique");
+  }
+  const integratedTargets = new Map();
+  for (const entry of options.provenanceIntegratedPullRequests) {
+    const number = integratedTargets.get(entry.targetCommitRef);
+    if (number !== undefined && number !== entry.number) {
+      fail("--provenance-pr-integrated target SHAs must map to one pull request");
+    }
+    integratedTargets.set(entry.targetCommitRef, entry.number);
+  }
+  options.provenanceIntegratedPullRequests = options.provenanceIntegratedPullRequests.toSorted(
+    (left, right) =>
+      left.number - right.number ||
+      left.targetCommitRef.localeCompare(right.targetCommitRef) ||
+      left.sourceCommitRef.localeCompare(right.sourceCommitRef),
+  );
+  const partialKeys = new Set(
+    options.provenancePartialPullRequests.map(
+      (entry) => `${entry.number}:${entry.sourceCommitRef}:${entry.targetCommitRef}`,
+    ),
+  );
+  if (partialKeys.size !== options.provenancePartialPullRequests.length) {
+    fail("--provenance-pr-partial values must be unique");
+  }
+  if (
+    new Set(options.provenancePartialPullRequests.map((entry) => entry.targetCommitRef)).size !==
+    options.provenancePartialPullRequests.length
+  ) {
+    fail("--provenance-pr-partial target SHAs must be unique");
+  }
+  options.provenancePartialPullRequests = options.provenancePartialPullRequests.toSorted(
+    (left, right) =>
+      left.number - right.number ||
+      left.sourceCommitRef.localeCompare(right.sourceCommitRef) ||
+      left.targetCommitRef.localeCompare(right.targetCommitRef),
+  );
+  const explicitTargetCommits = [
+    ...options.provenanceAdaptedPullRequests.map((entry) => entry.targetCommitRef),
+    ...integratedTargets.keys(),
+    ...options.provenancePartialPullRequests.map((entry) => entry.targetCommitRef),
+  ];
+  if (new Set(explicitTargetCommits).size !== explicitTargetCommits.length) {
+    fail("adapted, integrated, and partial provenance target SHAs must be disjoint");
+  }
   return options;
 }
 
 function run(command, args) {
   return execFileSync(command, args, {
     encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "1" },
+    env: command === "git" ? canonicalGitEnvironment() : { ...process.env, NO_COLOR: "1" },
     maxBuffer: 16 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -161,13 +421,13 @@ function git(args) {
   return run("git", args).trimEnd();
 }
 
-function gitIsAncestor(base, target) {
+function isCommitAncestor(ancestor, descendant) {
   const result = spawnSync(
     "git",
-    ["merge-base", "--is-ancestor", `${base}^{commit}`, `${target}^{commit}`],
+    ["merge-base", "--is-ancestor", `${ancestor}^{commit}`, `${descendant}^{commit}`],
     {
       encoding: "utf8",
-      env: { ...process.env, NO_COLOR: "1" },
+      env: canonicalGitEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -178,25 +438,166 @@ function gitIsAncestor(base, target) {
     return false;
   }
   fail(
-    `could not validate release range ancestry for ${base}..${target}: ${
+    `could not validate contribution record ancestry ${ancestor}..${descendant}: ${
       result.stderr?.trim() || result.signal || result.status
     }`,
   );
 }
 
-function githubApi(args) {
-  try {
-    return JSON.parse(run("ghx", ["api", ...args]).replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, ""));
-  } catch (error) {
-    if (typeof error.stdout === "string" && error.stdout.trim() !== "") {
-      return JSON.parse(error.stdout.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, ""));
-    }
-    throw error;
+function stripAnsi(value) {
+  return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function githubApiContext(args) {
+  const operation = args[0] ?? "unknown";
+  if (operation !== "graphql") {
+    return `REST ${operation}`;
   }
+  const query = args.find((value) => value.startsWith("query="))?.slice("query=".length) ?? "";
+  const digest = createHash("sha256").update(query).digest("hex");
+  return `graphql query sha256=${digest}`;
+}
+
+function sanitizedGithubResponsePrefix(value) {
+  return stripAnsi(value)
+    .replace(/\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,})\b/g, "[redacted-token]")
+    .replace(/\b(authorization|cookie|token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+}
+
+function stringOutput(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  return Buffer.isBuffer(value) ? value.toString("utf8") : "";
+}
+
+function sleepSync(delayMs) {
+  if (delayMs > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+  }
+}
+
+function githubApiFailure({ args, attempt, attempts, error, raw }) {
+  const context = githubApiContext(args);
+  const prefix = sanitizedGithubResponsePrefix(raw);
+  let responseKind = "non-JSON body";
+  if (raw.trim() !== "") {
+    try {
+      JSON.parse(stripAnsi(raw));
+      responseKind = "error response";
+    } catch {
+      responseKind = "non-JSON body";
+    }
+  }
+  const execution = [
+    error?.code === undefined ? undefined : `code=${error.code}`,
+    error?.status === undefined ? undefined : `status=${error.status}`,
+    error?.signal === undefined ? undefined : `signal=${error.signal}`,
+    sanitizedGithubResponsePrefix(stringOutput(error?.stderr)),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  const detail = prefix
+    ? `${responseKind} prefix=${JSON.stringify(prefix)}`
+    : `execution error=${JSON.stringify(execution || "unknown failure")}`;
+  const failure = new Error(
+    `GitHub API ${context} failed after ${attempt}/${attempts} attempts: ${detail}`,
+  );
+  failure.githubApiRetriesExhausted = true;
+  return failure;
+}
+
+function isRetryableGithubApiFailure(error, raw) {
+  const prefix = sanitizedGithubResponsePrefix(raw);
+  if (/^\s*</.test(raw)) {
+    return !/(?:access denied|authentication required|captcha|forbidden|sign in to github|single sign-on|sso required)/i.test(
+      prefix,
+    );
+  }
+  if (error instanceof SyntaxError && raw.trim() !== "") {
+    return true;
+  }
+  if (error) {
+    const detail = [
+      error?.code,
+      error?.status,
+      error?.signal,
+      error?.message,
+      stringOutput(error?.stderr),
+      raw,
+    ]
+      .filter((value) => value !== undefined && value !== null)
+      .join(" ");
+    return /(?:operation timed out|ECONNRESET|ETIMEDOUT|EAI_AGAIN|TLS handshake timeout|stream error: .*CANCEL|upstream connect error|connection termination|connection reset by peer|error connecting to api\.github\.com|something went wrong|temporarily unavailable|internal server error|rate limit|HTTP\s+(?:429|5\d\d)\b|unexpected end of JSON input|unterminated string|unterminated fractional number)/i.test(
+      detail,
+    );
+  }
+  return raw.trim() === "";
+}
+
+export function githubApi(
+  args,
+  { execute = run, retryDelaysMs = githubApiRetryDelaysMs, sleep = sleepSync } = {},
+) {
+  const attempts = retryDelaysMs.length + 1;
+  let lastError;
+  let lastRaw = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let raw = "";
+    let executionError;
+    try {
+      raw = execute("ghx", ["api", ...args]);
+    } catch (error) {
+      executionError = error;
+      raw = stringOutput(error?.stdout);
+    }
+    lastError = executionError;
+    lastRaw = raw;
+    if (!executionError && raw.trim() !== "") {
+      try {
+        return JSON.parse(stripAnsi(raw));
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!isRetryableGithubApiFailure(executionError ?? lastError, raw) || attempt === attempts) {
+      throw githubApiFailure({
+        args,
+        attempt,
+        attempts,
+        error: lastError,
+        raw: lastRaw,
+      });
+    }
+    sleep(retryDelaysMs[attempt - 1]);
+  }
+  throw githubApiFailure({ args, attempt: attempts, attempts, error: lastError, raw: lastRaw });
 }
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function exactHeadingMatches(sectionSource, heading) {
+  return [...sectionSource.matchAll(new RegExp(`^${escapeRegExp(heading)}\\r?$`, "gmu"))];
+}
+
+function sourceBeforeContributionRecord(sectionSource, label) {
+  const headings = [
+    ...sectionSource.matchAll(/^### Complete contribution (?:ledger|record)\r?$/gmu),
+  ];
+  if (headings.length > 1) {
+    fail(`${label} contains multiple complete contribution headings`);
+  }
+  return headings.length === 0
+    ? sectionSource.trimEnd()
+    : sectionSource.slice(0, headings[0].index).trimEnd();
 }
 
 function isEligibleHandle(handle) {
@@ -226,6 +627,16 @@ function editorialClassification(subject) {
 function mergedByTarget(mergedAt, targetTimestamp) {
   const mergedTimestamp = Date.parse(mergedAt);
   return Number.isFinite(mergedTimestamp) && mergedTimestamp <= targetTimestamp;
+}
+
+export function pullRequestMergedByTarget(node, targetCommit, targetTimestamp) {
+  const mergedTimestamp = Date.parse(node?.mergedAt);
+  const exactMerge = node?.mergeCommit?.oid === targetCommit;
+  return (
+    Number.isFinite(mergedTimestamp) &&
+    (mergedTimestamp <= targetTimestamp ||
+      (exactMerge && mergedTimestamp <= targetTimestamp + 1_000))
+  );
 }
 
 function sectionFor(changelog, version) {
@@ -317,13 +728,24 @@ function closingReferencesIn(text) {
   return references;
 }
 
-function standardRevertedHash(message) {
-  return message
+export function standardRevertedHash(message) {
+  const paragraphs = message
     .trim()
     .split(/\n\s*\n/)
-    .map((paragraph) => paragraph.trim())
-    .map((paragraph) => paragraph.match(/^This reverts commit ([0-9a-f]{7,40})\.$/i)?.[1])
-    .find(Boolean);
+    .map((paragraph) => paragraph.trim());
+  for (const [index, paragraph] of paragraphs.entries()) {
+    const revertedHash = paragraph.match(/^This reverts commit ([0-9a-f]{7,40})\.$/i)?.[1];
+    if (!revertedHash) {
+      continue;
+    }
+    // GitHub squash messages can embed a reverted intermediate commit. Its
+    // marker follows the corresponding bullet and does not revert the squash.
+    if (/^\*\s+Revert\b/i.test(paragraphs[index - 1] ?? "")) {
+      continue;
+    }
+    return revertedHash;
+  }
+  return undefined;
 }
 
 function handlesIn(text) {
@@ -332,13 +754,26 @@ function handlesIn(text) {
     return [];
   }
   const content = text.slice(0, thanksStart);
+  return thanksHandlesIn(text).filter(
+    (handle) =>
+      isEligibleHandle(handle) &&
+      !new RegExp(`(?<![A-Za-z0-9-])@${escapeRegExp(handle)}\\b`, "i").test(content),
+  );
+}
+
+function thanksHandlesIn(text) {
+  const thanksStart = text.lastIndexOf(" Thanks ");
+  if (thanksStart < 0) {
+    return [];
+  }
   return [...text.slice(thanksStart).matchAll(/@([A-Za-z0-9-]+)/g)]
     .map((match) => match[1])
-    .filter(
-      (handle) =>
-        isEligibleHandle(handle) &&
-        !new RegExp(`(?<![A-Za-z0-9-])@${escapeRegExp(handle)}\\b`, "i").test(content),
-    );
+    .filter(isEligibleHandle);
+}
+
+function creditsHandle(text, handle) {
+  const expected = handle.toLowerCase();
+  return thanksHandlesIn(text).some((candidate) => candidate.toLowerCase() === expected);
 }
 
 function externalReferencesIn(text) {
@@ -421,33 +856,113 @@ export function contributionRecordFor(section) {
   return result;
 }
 
-function completeContributionRecord(section, label) {
-  const recordStart = section.source.search(/\n### Complete contribution record\r?$/m);
-  if (recordStart < 0) {
-    fail(`${label} is missing ### Complete contribution record`);
-  }
-  const recordSource = section.source.slice(recordStart);
-  const provenance = recordSource.match(
-    /^This audited record covers the complete \S+\.\.[0-9a-f]{40} history: (?<count>[0-9]+) merged PRs?\./mu,
-  );
-  if (!provenance?.groups?.count) {
-    fail(`${label} is missing exact complete contribution record provenance`);
-  }
-  const record = contributionRecordFor(section);
-  const declaredCount = Number(provenance.groups.count);
-  if (record.pullRequests.size !== declaredCount) {
+function completeContributionRecordPullRequests(section, label) {
+  const recordHeadings = exactHeadingMatches(section.source, "### Complete contribution record");
+  if (recordHeadings.length !== 1) {
     fail(
-      `${label} contribution record declares ${declaredCount} PRs but contains ${record.pullRequests.size}`,
+      `${label} must contain exactly one ### Complete contribution record heading; found ${recordHeadings.length}`,
     );
   }
-  return { record, declaredCount };
+  const recordStart = recordHeadings[0].index;
+  const recordSource = section.source.slice(recordStart);
+  const provenancePattern =
+    /^This audited record covers the complete (?<base>\S+)\.\.(?<target>[0-9a-f]{40}) history: (?<count>[0-9]+) merged PRs?\./gmu;
+  const provenanceLines = [...recordSource.matchAll(provenancePattern)];
+  if (provenanceLines.length !== 1) {
+    fail(
+      `${label} must contain exactly one complete contribution record provenance line; found ${provenanceLines.length}`,
+    );
+  }
+  const provenance = provenanceLines[0];
+  const rows = new Map();
+  let inPullRequests = false;
+  let pullRequestHeadings = 0;
+  let shippedBaselineLines = 0;
+  for (const line of recordSource.split("\n")) {
+    if (line === "### Complete contribution record" || line.trim() === "") {
+      continue;
+    }
+    if (line === "#### Pull requests") {
+      pullRequestHeadings += 1;
+      inPullRequests = true;
+      continue;
+    }
+    if (line.startsWith("#### ")) {
+      fail(`${label} contains unsupported contribution record subsection: ${line}`);
+    }
+    const row = line.match(/^- \*\*PR #(?<number>[0-9]+)\*\*(?:\s.*)?$/u);
+    if (row) {
+      const number = Number(row.groups.number);
+      if (!inPullRequests) {
+        fail(`${label} contains contribution record PR row outside #### Pull requests: #${number}`);
+      }
+      if (rows.has(number)) {
+        fail(`${label} contains duplicate contribution record PR rows: #${number}`);
+      }
+      rows.set(number, line);
+      continue;
+    }
+    if (inPullRequests) {
+      fail(`${label} contains invalid #### Pull requests row: ${line}`);
+    }
+    if (provenancePattern.test(line)) {
+      provenancePattern.lastIndex = 0;
+      continue;
+    }
+    provenancePattern.lastIndex = 0;
+    if (line.startsWith("Shipped baseline exclusions:")) {
+      shippedBaselineLines += 1;
+      if (shippedBaselineLines > 1) {
+        fail(`${label} contains multiple shipped baseline exclusion lines`);
+      }
+      continue;
+    }
+    fail(`${label} contains unexpected contribution record preamble: ${line}`);
+  }
+  if (pullRequestHeadings !== 1) {
+    fail(
+      `${label} must contain exactly one #### Pull requests subsection; found ${pullRequestHeadings}`,
+    );
+  }
+  if (!provenance?.groups?.base || !provenance.groups.target || !provenance.groups.count) {
+    fail(`${label} is missing exact complete contribution record provenance`);
+  }
+  const declaredCount = Number(provenance.groups.count);
+  if (rows.size !== declaredCount) {
+    fail(`${label} contribution record declares ${declaredCount} PRs but contains ${rows.size}`);
+  }
+  return {
+    base: provenance.groups.base,
+    declaredCount,
+    rows,
+    target: provenance.groups.target,
+  };
+}
+
+function completeContributionRecord(section, label, expectedRange) {
+  const exact = completeContributionRecordPullRequests(section, label);
+  if (
+    expectedRange &&
+    (exact.base !== expectedRange.base || exact.target !== expectedRange.target)
+  ) {
+    fail(
+      `${label} contribution record provenance mismatch: expected ${expectedRange.base}..${expectedRange.target}, found ${exact.base}..${exact.target}`,
+    );
+  }
+  const record = contributionRecordFor(section);
+  if (record.pullRequests.size !== exact.rows.size) {
+    fail(
+      `${label} contribution record parser resolved ${record.pullRequests.size} of ${exact.rows.size} exact rows`,
+    );
+  }
+  return { ...exact, record };
 }
 
 export function cumulativeShippedPullRequests(changelog, label) {
   const sections = extractChangelogReleaseSections(changelog).filter(
     (section) =>
       section.version !== "Unreleased" &&
-      section.source.includes("\n### Complete contribution record"),
+      exactHeadingMatches(section.source, "### Complete contribution record").length > 0,
   );
   if (sections.length === 0) {
     fail(`${label} is missing ### Complete contribution record`);
@@ -502,6 +1017,36 @@ export function subtractShippedPullRequests(source, baselines) {
   return { baselines: metadata, pullRequests: excluded };
 }
 
+export function exactShippedPullRequestExclusions(source, baselines) {
+  const included = new Set(source.inventory.partitions.pullRequests.included.members);
+  // Exact tag content is publication truth. Historical credit rows may be incomplete,
+  // so they cannot veto a patch-equivalence exclusion proven by the inventory.
+  const excluded = new Set(
+    source.inventory.partitions.pullRequests.shipped.members.filter(
+      (number) => !included.has(number),
+    ),
+  );
+  const claimed = new Set();
+  const metadata = baselines
+    .toSorted((left, right) => left.ref.localeCompare(right.ref))
+    .map((baseline) => {
+      const pullRequests = source.inventory.commits
+        .filter(
+          (commit) =>
+            commit.disposition === "shipped" &&
+            commit.shippedEvidence.some((evidence) => evidence.ref === baseline.ref),
+        )
+        .flatMap((commit) => commit.pullRequests)
+        .filter((number) => excluded.has(number) && !claimed.has(number));
+      const members = [...new Set(pullRequests)].toSorted((left, right) => left - right);
+      for (const number of members) {
+        claimed.add(number);
+      }
+      return { count: members.length, pullRequests: members, ref: baseline.ref };
+    });
+  return { baselines: metadata, pullRequests: excluded };
+}
+
 export function withoutExcludedContributionRecords(record, excludedReferences) {
   if (excludedReferences.size === 0) {
     return record;
@@ -542,16 +1087,10 @@ export function contaminatingPullRequestReferences({
   noteReferences,
   recordedReferences,
   sourcePullRequests,
-  sourceReferences,
   seededPullRequests,
   nodes,
 }) {
   const allowed = new Set([...sourcePullRequests, ...seededPullRequests]);
-  for (const number of sourceReferences) {
-    if (nodes.get(number)?.__typename === "PullRequest") {
-      allowed.add(number);
-    }
-  }
   return [...new Set([...noteReferences, ...recordedReferences])].filter(
     (number) => nodes.get(number)?.__typename === "PullRequest" && !allowed.has(number),
   );
@@ -567,137 +1106,130 @@ function appendReferences(references, additions) {
   }
 }
 
-function sourceCommits(base, target) {
-  const targetCommit = git(["rev-parse", `${target}^{commit}`]);
-  if (!gitIsAncestor(base, targetCommit)) {
-    fail(`release range base ${base} must be an ancestor of target ${target}`);
-  }
-  const mergeBase = git(["merge-base", base, targetCommit]);
-  const targetTimestamp = Date.parse(git(["show", "-s", "--format=%cI", targetCommit]));
-  if (!Number.isFinite(targetTimestamp)) {
-    fail(`could not resolve timestamp for release target ${target}`);
-  }
-  const output = git([
-    "log",
-    "--first-parent",
-    "--reverse",
-    "--format=%H%x1f%s%x1f%an%x1f%ae%x1f%B%x1e",
-    `${mergeBase}..${targetCommit}`,
+function sourceCommits(options) {
+  const provenanceNumbers = [
+    ...new Set([
+      ...options.provenanceAdaptedPullRequests.map((entry) => entry.number),
+      ...options.provenanceIntegratedPullRequests.map((entry) => entry.number),
+      ...options.provenancePartialPullRequests.map((entry) => entry.number),
+      ...options.provenancePullRequests.map((entry) => entry.number),
+    ]),
+  ].toSorted((left, right) => left - right);
+  const pullRequestCommitCache =
+    provenanceNumbers.length === 0 ? new Map() : resolvePullRequestCommitLists(provenanceNumbers);
+  hydrateExactGitCommits([
+    ...options.provenancePullRequests.map((entry) => entry.commitRef),
+    ...options.provenanceAdaptedPullRequests.flatMap((entry) => [
+      entry.originCommitRef,
+      entry.targetCommitRef,
+    ]),
+    ...options.provenanceIntegratedPullRequests.flatMap((entry) => [
+      entry.sourceCommitRef,
+      entry.targetCommitRef,
+    ]),
+    ...options.provenancePartialPullRequests.flatMap((entry) => [
+      entry.sourceCommitRef,
+      entry.targetCommitRef,
+    ]),
+    ...[...pullRequestCommitCache.values()].flat(),
   ]);
-  const commits = new Map();
-  const revertsByTarget = new Map();
-  for (const record of output.split("\x1e")) {
-    if (!record) {
-      continue;
+  const resolveCachedPullRequestCommits = (numbers) => {
+    const missing = numbers.filter((number) => !pullRequestCommitCache.has(number));
+    if (missing.length > 0) {
+      const resolved = resolvePullRequestCommitLists(missing);
+      hydrateExactGitCommits([...resolved.values()].flat());
+      for (const [number, commits] of resolved) {
+        pullRequestCommitCache.set(number, commits);
+      }
     }
-    const [rawHash, subject, authorName, authorEmail, ...bodyParts] = record.split("\x1f");
-    const hash = rawHash.trim();
-    const body = bodyParts.join("\x1f");
-    const revertedHash = standardRevertedHash(body);
-    const isRevert = Boolean(revertedHash) || subject.startsWith('Revert "');
-    commits.set(hash, {
-      authorEmail,
-      authorName,
-      body,
-      hash,
-      isRevert,
-      revertedHash,
-      subject,
-    });
-  }
-  for (const commit of commits.values()) {
-    if (!commit.revertedHash) {
-      continue;
-    }
-    const targetHash = [...commits.keys()].find((candidate) =>
-      candidate.startsWith(commit.revertedHash),
+    return new Map(numbers.map((number) => [number, pullRequestCommitCache.get(number)]));
+  };
+  const resolveHydratedPullRequestMetadata = (numbers) => {
+    const metadata = resolvePullRequestMetadata(numbers);
+    hydrateExactGitCommits(
+      [...metadata.values()].flatMap((entry) => [
+        entry.baseCommit,
+        entry.headCommit,
+        entry.mergeCommit,
+      ]),
     );
-    if (targetHash) {
-      const reverts = revertsByTarget.get(targetHash) ?? [];
-      reverts.push(commit.hash);
-      revertsByTarget.set(targetHash, reverts);
-    }
-  }
-  const active = new Map();
-  function isActive(hash) {
-    if (active.has(hash)) {
-      return active.get(hash);
-    }
-    const cancellingReverts = revertsByTarget.get(hash) ?? [];
-    const value = !cancellingReverts.some((revertHash) => isActive(revertHash));
-    active.set(hash, value);
-    return value;
-  }
-  const revertedCommitStates = new Map();
-  function revertedCommitState(ref, seen = new Set()) {
-    let hash;
-    try {
-      hash = git(["rev-parse", `${ref}^{commit}`]);
-    } catch {
-      return undefined;
-    }
-    const cached = revertedCommitStates.get(hash);
-    if (cached) {
-      return cached;
-    }
-    if (seen.has(hash)) {
-      fail(`cyclic revert history at ${hash}`);
-    }
-    seen.add(hash);
-    const output = git(["show", "-s", "--format=%s%x1f%B", hash]);
-    const [subject, ...bodyParts] = output.split("\x1f");
-    const body = bodyParts.join("\x1f");
-    const message = `${subject}\n${body}`;
-    const revertedHash = standardRevertedHash(body);
-    const targetState = revertedHash ? revertedCommitState(revertedHash, seen) : undefined;
-    const state = targetState
-      ? { ...targetState, depth: targetState.depth + 1 }
-      : { depth: 0, hash, references: referencesIn(message) };
-    revertedCommitStates.set(hash, state);
-    return state;
-  }
+    return metadata;
+  };
+  const resolveHydratedComparison = (options) => {
+    const comparison = resolveMergedPullRequestComparison(options);
+    hydrateExactGitCommits(
+      comparison.records.flatMap((entry) => [
+        entry.baseCommit,
+        entry.headCommit,
+        entry.mergeCommit,
+      ]),
+    );
+    return comparison;
+  };
+  const inventory = assertCompleteReleaseSourceInventory(
+    buildReleaseSourceInventory(
+      {
+        baseRef: options.base,
+        comparisonBaseBranch: options.comparisonBaseBranch,
+        finalTargetRef: options.target,
+        maxSourceTailCommits: options.maxSourceTailCommits,
+        provenanceAdaptedPullRequests: options.provenanceAdaptedPullRequests,
+        provenanceIntegratedPullRequests: options.provenanceIntegratedPullRequests,
+        provenancePartialPullRequests: options.provenancePartialPullRequests,
+        provenancePullRequests: options.provenancePullRequests,
+        provenanceRefs: options.provenanceRefs,
+        shippedRefs: options.shippedRefs,
+        sourceTargetRef: options.sourceTarget ?? options.target,
+      },
+      {
+        resolveAssociations: (commits, targetTimestamp) =>
+          resolveAssociatedPullRequests(commits, targetTimestamp),
+        resolveComparisonPullRequests: resolveHydratedComparison,
+        resolvePullRequestCommits: resolveCachedPullRequestCommits,
+        resolvePullRequestMetadata: resolveHydratedPullRequestMetadata,
+        resolvePullRequests: (numbers) => {
+          const nodes = resolveReferences(numbers);
+          return new Map(numbers.map((number) => [number, nodes.get(number) ?? null]));
+        },
+      },
+    ),
+  );
+  const source = sourceContributionsFromInventory(inventory);
+  return sourceContributionsFromInventory(inventory, resolveCommitCoauthors(source.activeCommits));
+}
 
-  const references = [];
-  const revertedReferences = new Set();
-  const revertedCommitHashes = new Set();
-  const coauthorsByReference = new Map();
+export function sourceContributionsFromInventory(inventory, resolvedCommitCoauthors = new Map()) {
   const activeCommits = [];
-  for (const commit of commits.values()) {
-    if (commit.isRevert && isActive(commit.hash)) {
-      const coauthorEmails = [...commit.body.matchAll(/^Co-authored-by:\s*.+?<([^>\s]+)>$/gim)].map(
-        (match) => match[1],
-      );
-      activeCommits.push({
-        authorEmail: commit.authorEmail,
-        authorHandle: githubHandleFromNoreply(commit.authorEmail),
-        authorName: commit.authorName,
-        body: commit.body,
-        closingReferences: [],
-        coauthors: coauthorEmails.map(githubHandleFromNoreply).filter(isEligibleHandle),
-        coauthorEmails,
-        hash: commit.hash,
-        isRevert: true,
-        pullRequests: [],
-        references: [],
-        subject: commit.subject,
-      });
-      continue;
-    }
-    if (commit.isRevert) {
-      continue;
-    }
-    const uniqueReferences = [...new Set(referencesIn(`${commit.subject}\n${commit.body}`))];
-    if (!isActive(commit.hash)) {
-      revertedCommitHashes.add(commit.hash);
-      for (const number of uniqueReferences) {
+  const coauthorsByReference = new Map();
+  const manifestDirectCommits = new Set(inventory.partitions.commits.manifestDirect.members);
+  const references = [];
+  const pullRequests = new Set(inventory.partitions.pullRequests.included.members);
+  const revertedReferences = new Set();
+  for (const commit of inventory.commits) {
+    if (commit.disposition === "reverted") {
+      for (const number of [...commit.references, ...commit.pullRequests]) {
         revertedReferences.add(number);
       }
       continue;
+    }
+    if (commit.disposition !== "pull-request" && commit.disposition !== "direct") {
+      continue;
+    }
+    for (const number of [
+      ...commit.revertedExternalReferences,
+      ...commit.revertedExternalPullRequests,
+    ]) {
+      revertedReferences.add(number);
     }
     const coauthorEmails = [...commit.body.matchAll(/^Co-authored-by:\s*.+?<([^>\s]+)>$/gim)].map(
       (match) => match[1],
     );
     const coauthors = coauthorEmails.map(githubHandleFromNoreply).filter(isEligibleHandle);
+    addHandles(coauthors, resolvedCommitCoauthors.get(commit.commit) ?? []);
+    const isRevert = Boolean(standardRevertedHash(commit.body));
+    const commitReferences = isRevert ? [] : [...commit.references];
+    appendReferences(commitReferences, commit.pullRequests);
+    appendReferences(references, commitReferences);
     activeCommits.push({
       authorEmail: commit.authorEmail,
       authorHandle: githubHandleFromNoreply(commit.authorEmail),
@@ -706,106 +1238,59 @@ function sourceCommits(base, target) {
       closingReferences: closingReferencesIn(`${commit.subject}\n${commit.body}`),
       coauthors,
       coauthorEmails,
-      hash: commit.hash,
-      isRevert: false,
-      pullRequests: [],
-      references: uniqueReferences,
+      hash: commit.commit,
+      isRevert,
+      manifestDirect: manifestDirectCommits.has(commit.commit),
+      pullRequests: commit.pullRequests,
+      references: commitReferences,
       subject: commit.subject,
     });
-  }
-  for (const commit of commits.values()) {
-    if (!commit.isRevert || !commit.revertedHash || !isActive(commit.hash)) {
-      continue;
-    }
-    const targetInRange = [...commits.keys()].some((candidate) =>
-      candidate.startsWith(commit.revertedHash),
-    );
-    if (targetInRange) {
-      continue;
-    }
-    const revertedState = revertedCommitState(commit.revertedHash);
-    if (!revertedState) {
-      continue;
-    }
-    if (revertedState.depth % 2 !== 0) {
-      continue;
-    }
-    revertedCommitHashes.add(revertedState.hash);
-    for (const number of revertedState.references) {
-      revertedReferences.add(number);
-    }
-  }
-  const activePullRequests = resolveAssociatedPullRequests(
-    activeCommits.map((commit) => commit.hash),
-    targetTimestamp,
-  );
-  const resolvedCoauthors = resolveCommitCoauthors(activeCommits);
-  const pullRequests = new Set();
-  const nonRevertPullRequests = new Set();
-  for (const commit of activeCommits) {
-    const associatedPullRequests = activePullRequests.get(commit.hash) ?? [];
-    commit.pullRequests = associatedPullRequests;
-    addHandles(commit.coauthors, resolvedCoauthors.get(commit.hash) ?? []);
-    appendReferences(commit.references, associatedPullRequests);
-    for (const number of associatedPullRequests) {
-      pullRequests.add(number);
-      if (!commit.isRevert) {
-        nonRevertPullRequests.add(number);
-      }
-    }
-    appendReferences(references, commit.references);
-    if (commit.coauthors.length === 0) {
-      continue;
-    }
-    for (const number of commit.references) {
+    for (const number of commitReferences) {
       const handles = coauthorsByReference.get(number) ?? new Set();
-      for (const handle of commit.coauthors) {
+      for (const handle of coauthors) {
         handles.add(handle);
       }
       coauthorsByReference.set(number, handles);
     }
   }
-  const revertedPullRequests = new Set();
-  for (const pullRequests of resolveAssociatedPullRequests(
-    [...revertedCommitHashes],
-    targetTimestamp,
-  ).values()) {
-    for (const number of pullRequests) {
-      revertedPullRequests.add(number);
-    }
-  }
-  // A later active implementation supersedes an earlier reverted fix, including
-  // direct commits that cite the same issue without having a recoverable PR.
-  for (const commit of activeCommits) {
-    if (commit.isRevert) {
-      continue;
-    }
-    for (const number of commit.references) {
-      revertedReferences.delete(number);
-    }
-  }
-  // A PR can span several commits. A reverted commit does not erase the PR while
-  // another non-revert commit from it remains active in this release range.
-  for (const number of revertedPullRequests) {
-    if (!nonRevertPullRequests.has(number)) {
-      pullRequests.delete(number);
-      revertedReferences.add(number);
-    }
-  }
   for (const number of pullRequests) {
     revertedReferences.delete(number);
   }
-
+  for (const commit of activeCommits) {
+    for (const number of commit.closingReferences) {
+      revertedReferences.delete(number);
+    }
+  }
   return {
     activeCommits,
     coauthorsByReference,
-    mergeBase,
+    finalTarget: inventory.range.finalTarget,
+    inventory,
+    mergeBase: inventory.range.mergeBase,
+    manifestDirectCommits,
     pullRequests,
     references,
     revertedReferences,
-    target: targetCommit,
-    targetTimestamp,
+    sourceTail: inventory.range.sourceTail,
+    target: inventory.range.sourceTarget,
+    targetTimestamp: inventory.range.targetTimestamp,
   };
+}
+
+export function graphqlDataForResponse(response) {
+  const errors = Array.isArray(response?.errors) ? response.errors : [];
+  if (errors.length > 0) {
+    fail(
+      `GitHub GraphQL response contained errors:\n${errors
+        .map((error) => error?.message || "unknown GraphQL error")
+        .join("\n")}`,
+    );
+  }
+  if (response?.data && typeof response.data === "object") {
+    return response.data;
+  }
+  const detail = response?.message ? `\n${response.message}` : "";
+  fail(`GitHub GraphQL response did not include data.${detail}`);
 }
 
 function graphql(query) {
@@ -813,20 +1298,12 @@ function graphql(query) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       const response = githubApi(["graphql", "-f", `query=${query}`]);
-      if (response?.data && typeof response.data === "object") {
-        return response.data;
-      }
-      const errors = Array.isArray(response?.errors)
-        ? response.errors.map((error) => error?.message).filter(Boolean)
-        : [];
-      const detail = [...errors, response?.message].filter(Boolean).join("\n");
-      throw new Error(
-        detail
-          ? `GitHub GraphQL response did not include data:\n${detail}`
-          : "GitHub GraphQL response did not include data.",
-      );
+      return graphqlDataForResponse(response);
     } catch (error) {
       lastError = error;
+      if (error?.githubApiRetriesExhausted) {
+        throw error;
+      }
       const message = [error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n");
       // Historical ranges batch hundreds of objects; only retry transient transport failures.
       if (
@@ -842,145 +1319,511 @@ function graphql(query) {
   throw lastError;
 }
 
-function resolveAssociatedPullRequests(commitHashes, targetTimestamp) {
-  const pullRequestsByCommit = new Map();
-  const pending = [];
-  function appendPullRequests(commitHash, connection) {
-    const pullRequests = pullRequestsByCommit.get(commitHash) ?? [];
-    const seen = new Set(pullRequests);
-    for (const pullRequest of connection?.nodes ?? []) {
-      // GitHub's mergedAt can trail the merge commit timestamp by a second.
-      // Keep an exact merge-commit association so a release ending there does not drop its PR.
-      const isExactMergeCommit = pullRequest.mergeCommit?.oid === commitHash;
-      if (
-        pullRequest.mergedAt &&
-        (isExactMergeCommit || mergedByTarget(pullRequest.mergedAt, targetTimestamp)) &&
-        !seen.has(pullRequest.number)
-      ) {
-        pullRequests.push(pullRequest.number);
-        seen.add(pullRequest.number);
+function teamUniverseSearchPage(query, after) {
+  const data = graphql(`query {
+    search(
+      type: ISSUE
+      query: ${JSON.stringify(query)}
+      first: 100
+      after: ${after ? JSON.stringify(after) : "null"}
+    ) {
+      issueCount
+      nodes {
+        ... on PullRequest {
+          number
+          mergedAt
+          baseRefName
+          baseRefOid
+          headRefOid
+          mergeCommit { oid }
+        }
       }
+      pageInfo { endCursor hasNextPage }
     }
-    pullRequestsByCommit.set(commitHash, pullRequests);
-    if (connection?.pageInfo?.hasNextPage) {
-      pending.push({ commitHash, cursor: connection.pageInfo.endCursor });
+  }`);
+  return data.search;
+}
+
+export function resolveMergedPullRequestComparison({
+  baseBranch,
+  endTimestamp,
+  repository,
+  startTimestamp,
+}) {
+  const query = teamUniverseWindowQuery({
+    base: baseBranch,
+    end: isoSecond(endTimestamp),
+    repository,
+    start: isoSecond(startTimestamp),
+  });
+  return createTeamUniverseResolver({
+    base: baseBranch,
+    fetchPage: teamUniverseSearchPage,
+    repository,
+  })(query);
+}
+
+export function resolvePullRequestCommitLists(numbers, { fetchPage = graphql } = {}) {
+  const uniqueNumbers = [...new Set(numbers)].toSorted((left, right) => left - right);
+  const states = new Map(
+    uniqueNumbers.map((number) => [
+      number,
+      {
+        commits: [],
+        expectedCount: undefined,
+        seenCommits: new Set(),
+        seenCursors: new Set(),
+      },
+    ]),
+  );
+  const pending = [];
+
+  function appendPage(number, connection) {
+    const state = states.get(number);
+    if (
+      !connection ||
+      !Number.isInteger(connection.totalCount) ||
+      connection.totalCount <= 0 ||
+      !Array.isArray(connection.nodes) ||
+      typeof connection.pageInfo?.hasNextPage !== "boolean" ||
+      (connection.pageInfo.hasNextPage &&
+        (typeof connection.pageInfo.endCursor !== "string" ||
+          connection.pageInfo.endCursor.length === 0))
+    ) {
+      fail(`GitHub did not return a complete commits connection for PR #${number}`);
+    }
+    if (state.expectedCount !== undefined && state.expectedCount !== connection.totalCount) {
+      fail(`GitHub commits totalCount changed for PR #${number}`);
+    }
+    state.expectedCount = connection.totalCount;
+    for (const node of connection.nodes) {
+      const commit = node?.commit?.oid;
+      if (typeof commit !== "string" || !/^[0-9a-f]{40}$/.test(commit)) {
+        fail(`GitHub returned an invalid commit for PR #${number}`);
+      }
+      if (state.seenCommits.has(commit)) {
+        fail(`GitHub commits returned a duplicate member for PR #${number}`);
+      }
+      state.seenCommits.add(commit);
+      state.commits.push(commit);
+    }
+    if (connection.pageInfo.hasNextPage) {
+      const cursor = connection.pageInfo.endCursor;
+      if (state.seenCursors.has(cursor)) {
+        fail(`GitHub commits repeated cursor ${cursor} for PR #${number}`);
+      }
+      state.seenCursors.add(cursor);
+      pending.push({ cursor, number });
     }
   }
-  for (let index = 0; index < commitHashes.length; index += commitAssociationQueryBatchSize) {
-    const chunk = commitHashes.slice(index, index + commitAssociationQueryBatchSize);
-    const fields = chunk
+
+  function queryFor(items) {
+    return `query { ${items
       .map(
-        (hash, offset) =>
-          `c${index + offset}: repository(owner: "openclaw", name: "openclaw") {
-            object(expression: ${JSON.stringify(hash)}) {
-              ... on Commit {
-                associatedPullRequests(first: 100) {
-                  nodes {
-                    number
-                    mergedAt
-                    mergeCommit { oid }
-                  }
-                  pageInfo { hasNextPage endCursor }
-                }
+        (item, offset) =>
+          `p${offset}: repository(owner: "openclaw", name: "openclaw") {
+            pullRequest(number: ${item.number}) {
+              number
+              commits(first: 100${item.cursor ? `, after: ${JSON.stringify(item.cursor)}` : ""}) {
+                totalCount
+                nodes { commit { oid } }
+                pageInfo { hasNextPage endCursor }
               }
             }
           }`,
       )
-      .join("\n");
-    const data = graphql(`query { ${fields} }`);
-    for (let offset = 0; offset < chunk.length; offset += 1) {
-      appendPullRequests(chunk[offset], data[`c${index + offset}`]?.object?.associatedPullRequests);
+      .join("\n")} }`;
+  }
+
+  for (let index = 0; index < uniqueNumbers.length; index += 20) {
+    const items = uniqueNumbers.slice(index, index + 20).map((number) => ({ number }));
+    const data = fetchPage(queryFor(items));
+    for (let offset = 0; offset < items.length; offset += 1) {
+      const item = items[offset];
+      const pullRequest = data?.[`p${offset}`]?.pullRequest;
+      if (pullRequest?.number !== item.number) {
+        fail(`GitHub did not return PR #${item.number} while resolving commits`);
+      }
+      appendPage(item.number, pullRequest.commits);
     }
   }
   while (pending.length > 0) {
-    const chunk = pending.splice(0, 20);
+    const items = pending.splice(0, 20);
+    const data = fetchPage(queryFor(items));
+    for (let offset = 0; offset < items.length; offset += 1) {
+      const item = items[offset];
+      const pullRequest = data?.[`p${offset}`]?.pullRequest;
+      if (pullRequest?.number !== item.number) {
+        fail(`GitHub did not return PR #${item.number} while paginating commits`);
+      }
+      appendPage(item.number, pullRequest.commits);
+    }
+  }
+  for (const [number, state] of states) {
+    if (state.commits.length !== state.expectedCount) {
+      fail(
+        `GitHub commits did not return ${state.expectedCount} complete unique members for PR #${number}`,
+      );
+    }
+  }
+  return new Map([...states].map(([number, state]) => [number, state.commits.toSorted()]));
+}
+
+export function resolvePullRequestMetadata(numbers, { fetchPage = graphql } = {}) {
+  const uniqueNumbers = [...new Set(numbers)].toSorted((left, right) => left - right);
+  const result = new Map();
+  for (let index = 0; index < uniqueNumbers.length; index += 40) {
+    const chunk = uniqueNumbers.slice(index, index + 40);
     const fields = chunk
       .map(
-        (item, offset) =>
-          `c${offset}: repository(owner: "openclaw", name: "openclaw") {
-            object(expression: ${JSON.stringify(item.commitHash)}) {
+        (number, offset) =>
+          `p${offset}: repository(owner: "openclaw", name: "openclaw") {
+            pullRequest(number: ${number}) {
+              baseRefName
+              baseRefOid
+              headRefOid
+              mergeCommit { oid }
+              mergedAt
+              number
+            }
+          }`,
+      )
+      .join("\n");
+    const data = fetchPage(`query { ${fields} }`);
+    for (let offset = 0; offset < chunk.length; offset += 1) {
+      const number = chunk[offset];
+      const pullRequest = data?.[`p${offset}`]?.pullRequest;
+      const mergedAt = Date.parse(pullRequest?.mergedAt);
+      if (
+        pullRequest?.number !== number ||
+        typeof pullRequest.baseRefName !== "string" ||
+        pullRequest.baseRefName.length === 0 ||
+        typeof pullRequest.baseRefOid !== "string" ||
+        !/^[0-9a-f]{40}$/.test(pullRequest.baseRefOid) ||
+        typeof pullRequest.headRefOid !== "string" ||
+        !/^[0-9a-f]{40}$/.test(pullRequest.headRefOid) ||
+        typeof pullRequest.mergeCommit?.oid !== "string" ||
+        !/^[0-9a-f]{40}$/.test(pullRequest.mergeCommit.oid) ||
+        !Number.isFinite(mergedAt)
+      ) {
+        fail(`GitHub did not return exact merged PR metadata for #${number}`);
+      }
+      result.set(number, {
+        baseBranch: pullRequest.baseRefName,
+        baseCommit: pullRequest.baseRefOid,
+        headCommit: pullRequest.headRefOid,
+        mergeCommit: pullRequest.mergeCommit.oid,
+        mergedAt: new Date(mergedAt).toISOString(),
+        number,
+      });
+    }
+  }
+  return result;
+}
+
+function gitCommitAvailable(commit) {
+  const result = spawnSync("git", ["cat-file", "-e", `${commit}^{commit}`], {
+    encoding: "utf8",
+    env: canonicalGitEnvironment(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status === 0) {
+    return true;
+  }
+  if (result.status === 1 || result.status === 128) {
+    return false;
+  }
+  fail(`could not inspect Git commit ${commit}: ${result.stderr?.trim() || result.status}`);
+}
+
+function hydrateExactGitCommits(commits) {
+  const missing = [...new Set(commits)].filter((commit) => !gitCommitAvailable(commit)).toSorted();
+  for (let index = 0; index < missing.length; index += 50) {
+    const chunk = missing.slice(index, index + 50);
+    const result = spawnSync("git", ["fetch", "--quiet", "--no-tags", "origin", ...chunk], {
+      encoding: "utf8",
+      env: canonicalGitEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const unavailable = chunk.filter((commit) => !gitCommitAvailable(commit));
+    if (result.status !== 0 || unavailable.length > 0) {
+      fail(
+        `could not hydrate immutable Git commits ${unavailable.join(", ") || chunk.join(", ")}: ${
+          result.stderr?.trim() || result.signal || result.status
+        }`,
+      );
+    }
+  }
+}
+
+export function resolveAssociatedPullRequests(
+  commitHashes,
+  targetTimestamp,
+  allowExactMergeCommit = true,
+  { fetchPage = graphql } = {},
+) {
+  const states = new Map(
+    commitHashes.map((commit) => [
+      commit,
+      {
+        all: [],
+        expectedCount: undefined,
+        included: [],
+        seenCursors: new Set(),
+        seenNumbers: new Set(),
+      },
+    ]),
+  );
+  const pending = [];
+  function appendPage(commit, connection) {
+    const state = states.get(commit);
+    if (
+      !connection ||
+      !Array.isArray(connection.nodes) ||
+      !Number.isInteger(connection.totalCount) ||
+      connection.totalCount < 0 ||
+      typeof connection.pageInfo?.hasNextPage !== "boolean" ||
+      (connection.pageInfo.hasNextPage &&
+        (typeof connection.pageInfo.endCursor !== "string" ||
+          connection.pageInfo.endCursor.length === 0))
+    ) {
+      fail(`GitHub did not return a complete associatedPullRequests connection for ${commit}`);
+    }
+    if (state.expectedCount !== undefined && state.expectedCount !== connection.totalCount) {
+      fail(`GitHub associatedPullRequests totalCount changed for commit ${commit}`);
+    }
+    state.expectedCount = connection.totalCount;
+    for (const pullRequest of connection.nodes) {
+      const hasMergedAt = Object.hasOwn(pullRequest ?? {}, "mergedAt");
+      const hasMergeCommit = Object.hasOwn(pullRequest ?? {}, "mergeCommit");
+      const mergedAt =
+        typeof pullRequest?.mergedAt === "string"
+          ? Date.parse(pullRequest.mergedAt)
+          : pullRequest?.mergedAt === null
+            ? undefined
+            : Number.NaN;
+      const mergeCommit = pullRequest?.mergeCommit;
+      if (
+        !Number.isInteger(pullRequest?.number) ||
+        pullRequest.number <= 0 ||
+        !hasMergedAt ||
+        !hasMergeCommit ||
+        (pullRequest.mergedAt !== null && !Number.isFinite(mergedAt)) ||
+        (mergeCommit !== null &&
+          (typeof mergeCommit !== "object" ||
+            typeof mergeCommit.oid !== "string" ||
+            !/^[0-9a-f]{40}$/.test(mergeCommit.oid)))
+      ) {
+        fail(`GitHub returned an invalid associated pull request for commit ${commit}`);
+      }
+      if (state.seenNumbers.has(pullRequest.number)) {
+        fail(`GitHub associatedPullRequests returned a duplicate member for commit ${commit}`);
+      }
+      state.seenNumbers.add(pullRequest.number);
+      state.all.push(pullRequest.number);
+      const exactMerge = allowExactMergeCommit && pullRequest.mergeCommit?.oid === commit;
+      if (exactMerge && mergedAt > targetTimestamp + 1_000) {
+        fail(`exact merge association for commit ${commit} was merged after the release target`);
+      }
+      if (
+        Number.isFinite(mergedAt) &&
+        (mergedAt <= targetTimestamp || (exactMerge && mergedAt <= targetTimestamp + 1_000))
+      ) {
+        state.included.push(pullRequest.number);
+      }
+    }
+    if (connection.pageInfo.hasNextPage) {
+      const cursor = connection.pageInfo.endCursor;
+      if (state.seenCursors.has(cursor)) {
+        fail(`GitHub associatedPullRequests repeated cursor ${cursor} for commit ${commit}`);
+      }
+      state.seenCursors.add(cursor);
+      pending.push({ commit, cursor });
+    }
+  }
+  function queryFor(items) {
+    return `query { ${items
+      .map(
+        (item, index) =>
+          `c${index}: repository(owner: "openclaw", name: "openclaw") {
+            object(expression: ${JSON.stringify(item.commit)}) {
               ... on Commit {
-                associatedPullRequests(first: 100, after: ${JSON.stringify(item.cursor)}) {
-                  nodes {
-                    number
-                    mergedAt
-                    mergeCommit { oid }
-                  }
+                associatedPullRequests(first: 100${
+                  item.cursor ? `, after: ${JSON.stringify(item.cursor)}` : ""
+                }) {
+                  totalCount
+                  nodes { number mergedAt mergeCommit { oid } }
                   pageInfo { hasNextPage endCursor }
                 }
               }
             }
           }`,
       )
-      .join("\n");
-    const data = graphql(`query { ${fields} }`);
-    for (let offset = 0; offset < chunk.length; offset += 1) {
-      appendPullRequests(
-        chunk[offset].commitHash,
-        data[`c${offset}`]?.object?.associatedPullRequests,
+      .join("\n")} }`;
+  }
+  for (let index = 0; index < commitHashes.length; index += commitAssociationQueryBatchSize) {
+    const items = commitHashes
+      .slice(index, index + commitAssociationQueryBatchSize)
+      .map((commit) => ({ commit }));
+    const data = fetchPage(queryFor(items));
+    for (let offset = 0; offset < items.length; offset += 1) {
+      appendPage(items[offset].commit, data?.[`c${offset}`]?.object?.associatedPullRequests);
+    }
+  }
+  while (pending.length > 0) {
+    const items = pending.splice(0, 20);
+    const data = fetchPage(queryFor(items));
+    for (let offset = 0; offset < items.length; offset += 1) {
+      appendPage(items[offset].commit, data?.[`c${offset}`]?.object?.associatedPullRequests);
+    }
+  }
+  for (const [commit, state] of states) {
+    if (state.seenNumbers.size !== state.expectedCount) {
+      fail(
+        `GitHub associatedPullRequests did not return ${state.expectedCount} complete unique members for commit ${commit}`,
       );
     }
   }
-  return pullRequestsByCommit;
+  return {
+    allPullRequests: new Map(
+      [...states].map(([commit, state]) => [
+        commit,
+        state.all.toSorted((left, right) => left - right),
+      ]),
+    ),
+    pullRequests: new Map(
+      [...states].map(([commit, state]) => [
+        commit,
+        state.included.toSorted((left, right) => left - right),
+      ]),
+    ),
+    unresolved: [],
+  };
 }
 
 function issueConnectionName(node) {
-  if (node.__typename === "Issue") {
+  if (node?.__typename === "Issue") {
     return "closedByPullRequestsReferences";
   }
-  if (node.__typename === "PullRequest") {
+  if (node?.__typename === "PullRequest") {
     return "closingIssuesReferences";
   }
   return undefined;
 }
 
-function resolveIssueRelationshipPages(nodes) {
+export function resolveIssueRelationshipPages(nodes, { fetchPage = graphql } = {}) {
+  const states = new Map();
   const pending = [];
-  for (const [number, node] of nodes) {
-    const connectionName = issueConnectionName(node);
-    const pageInfo = connectionName ? node[connectionName]?.pageInfo : undefined;
-    if (pageInfo?.hasNextPage) {
-      pending.push({ connectionName, cursor: pageInfo.endCursor, number, type: node.__typename });
+
+  function appendPage(number, connection) {
+    const state = states.get(number);
+    if (
+      !connection ||
+      !Array.isArray(connection.nodes) ||
+      !Number.isInteger(connection.totalCount) ||
+      connection.totalCount < 0 ||
+      typeof connection.pageInfo?.hasNextPage !== "boolean" ||
+      (connection.pageInfo.hasNextPage &&
+        (typeof connection.pageInfo.endCursor !== "string" ||
+          connection.pageInfo.endCursor.length === 0))
+    ) {
+      fail(`GitHub did not return a complete ${state.connectionName} connection for #${number}`);
+    }
+    if (state.expectedCount !== undefined && state.expectedCount !== connection.totalCount) {
+      fail(`GitHub ${state.connectionName} totalCount changed for #${number}`);
+    }
+    state.expectedCount = connection.totalCount;
+    for (const member of connection.nodes) {
+      if (!Number.isInteger(member?.number) || member.number <= 0) {
+        fail(`GitHub returned an invalid ${state.connectionName} member for #${number}`);
+      }
+      if (state.seenNumbers.has(member.number)) {
+        fail(`GitHub ${state.connectionName} returned a duplicate member for #${number}`);
+      }
+      state.seenNumbers.add(member.number);
+      state.members.push(member);
+    }
+    if (state.seenNumbers.size > state.expectedCount) {
+      fail(`GitHub ${state.connectionName} returned more members than totalCount for #${number}`);
+    }
+    if (connection.pageInfo.hasNextPage) {
+      const cursor = connection.pageInfo.endCursor;
+      if (state.seenCursors.has(cursor)) {
+        fail(`GitHub ${state.connectionName} repeated cursor ${cursor} for #${number}`);
+      }
+      state.seenCursors.add(cursor);
+      pending.push({
+        connectionName: state.connectionName,
+        cursor,
+        number,
+        type: state.type,
+      });
     }
   }
+
+  for (const [number, node] of nodes) {
+    const connectionName = issueConnectionName(node);
+    if (!connectionName || node.number !== number) {
+      fail(`GitHub returned an invalid issue or pull request for #${number}`);
+    }
+    states.set(number, {
+      connectionName,
+      expectedCount: undefined,
+      members: [],
+      seenCursors: new Set(),
+      seenNumbers: new Set(),
+      type: node.__typename,
+    });
+    appendPage(number, node[connectionName]);
+  }
+
   while (pending.length > 0) {
     const chunk = pending.splice(0, 20);
     const fields = chunk
       .map((item, offset) => {
         const connection = `${item.connectionName}(first: 100, after: ${JSON.stringify(item.cursor)}) {
+          totalCount
           nodes { number }
           pageInfo { hasNextPage endCursor }
         }`;
         return `n${offset}: repository(owner: "openclaw", name: "openclaw") {
           issueOrPullRequest(number: ${item.number}) {
             ... on ${item.type} {
+              number
               ${connection}
             }
           }
         }`;
       })
       .join("\n");
-    const data = graphql(`query { ${fields} }`);
+    const data = fetchPage(`query { ${fields} }`);
     for (let offset = 0; offset < chunk.length; offset += 1) {
       const item = chunk[offset];
-      const node = nodes.get(item.number);
-      const connection = data[`n${offset}`]?.issueOrPullRequest?.[item.connectionName];
-      if (!node || !connection) {
-        continue;
+      const alias = data?.[`n${offset}`];
+      const pageNode = alias?.issueOrPullRequest;
+      if (
+        !alias ||
+        !Object.hasOwn(alias, "issueOrPullRequest") ||
+        !pageNode ||
+        pageNode.number !== item.number
+      ) {
+        fail(`GitHub did not return issue or pull request #${item.number} while paginating`);
       }
-      node[item.connectionName] = {
-        nodes: [...(node[item.connectionName]?.nodes ?? []), ...connection.nodes],
-        pageInfo: connection.pageInfo,
-      };
-      if (connection.pageInfo.hasNextPage) {
-        pending.push({
-          connectionName: item.connectionName,
-          cursor: connection.pageInfo.endCursor,
-          number: item.number,
-          type: item.type,
-        });
-      }
+      appendPage(item.number, pageNode[item.connectionName]);
     }
+  }
+
+  for (const [number, state] of states) {
+    if (state.seenNumbers.size !== state.expectedCount) {
+      fail(
+        `GitHub ${state.connectionName} did not return ${state.expectedCount} complete unique members for #${number}`,
+      );
+    }
+    nodes.get(number)[state.connectionName] = {
+      nodes: state.members,
+      pageInfo: { endCursor: null, hasNextPage: false },
+      totalCount: state.expectedCount,
+    };
   }
   return nodes;
 }
@@ -999,6 +1842,7 @@ function resolveReferences(numbers) {
               title
               author { __typename login }
               closedByPullRequestsReferences(first: 100) {
+                totalCount
                 nodes { number }
                 pageInfo { hasNextPage endCursor }
               }
@@ -1007,8 +1851,10 @@ function resolveReferences(numbers) {
               number
               title
               mergedAt
+              mergeCommit { oid }
               author { __typename login }
               closingIssuesReferences(first: 100) {
+                totalCount
                 nodes { number }
                 pageInfo { hasNextPage endCursor }
               }
@@ -1019,13 +1865,34 @@ function resolveReferences(numbers) {
       .join("\n");
     const data = graphql(`query { ${fields} }`);
     for (const number of chunk) {
-      const node = data[`n${number}`]?.issueOrPullRequest;
+      const alias = data?.[`n${number}`];
+      if (!alias || !Object.hasOwn(alias, "issueOrPullRequest")) {
+        fail(`GitHub did not return an issueOrPullRequest result for #${number}`);
+      }
+      const node = alias.issueOrPullRequest;
       if (node) {
         nodes.set(number, node);
       }
     }
   }
   return resolveIssueRelationshipPages(nodes);
+}
+
+function unresolvedRelationshipMembers(nodes, sourceNumbers, connectionName) {
+  const unresolved = [];
+  for (const sourceNumber of sourceNumbers) {
+    const node = nodes.get(sourceNumber);
+    for (const member of node?.[connectionName]?.nodes ?? []) {
+      if (!nodes.has(member.number)) {
+        unresolved.push({
+          connectionName,
+          member: member.number,
+          source: sourceNumber,
+        });
+      }
+    }
+  }
+  return unresolved;
 }
 
 function resolveGitHubHandles(handles) {
@@ -1082,42 +1949,122 @@ function resolveDirectCommitAuthors(commits) {
   return resolved;
 }
 
-function resolveCommitCoauthors(commits) {
-  const resolved = new Map();
+export function resolveCommitCoauthors(commits, { fetchPage = graphql } = {}) {
   const commitsWithCoauthors = commits.filter((commit) => commit.coauthorEmails.length > 0);
-  for (let index = 0; index < commitsWithCoauthors.length; index += 40) {
-    const chunk = commitsWithCoauthors.slice(index, index + 40);
-    const fields = chunk
+  const states = new Map(
+    commitsWithCoauthors.map((commit) => [
+      commit.hash,
+      {
+        coauthorEmails: new Set(commit.coauthorEmails.map((email) => email.toLowerCase())),
+        expectedCount: undefined,
+        handles: [],
+        seenCursors: new Set(),
+        seenMembers: new Set(),
+      },
+    ]),
+  );
+  const pending = [];
+
+  function appendPage(commit, connection) {
+    const state = states.get(commit);
+    if (
+      !connection ||
+      !Array.isArray(connection.nodes) ||
+      !Number.isInteger(connection.totalCount) ||
+      connection.totalCount < 0 ||
+      typeof connection.pageInfo?.hasNextPage !== "boolean" ||
+      (connection.pageInfo.hasNextPage &&
+        (typeof connection.pageInfo.endCursor !== "string" ||
+          connection.pageInfo.endCursor.length === 0))
+    ) {
+      fail(`GitHub did not return a complete authors connection for commit ${commit}`);
+    }
+    if (state.expectedCount !== undefined && state.expectedCount !== connection.totalCount) {
+      fail(`GitHub authors totalCount changed for commit ${commit}`);
+    }
+    state.expectedCount = connection.totalCount;
+    for (const author of connection.nodes) {
+      if (
+        typeof author?.email !== "string" ||
+        (author.user !== null &&
+          (typeof author.user !== "object" || typeof author.user.login !== "string"))
+      ) {
+        fail(`GitHub returned an invalid author for commit ${commit}`);
+      }
+      const memberKey = JSON.stringify({
+        email: author.email.toLowerCase(),
+        login: author.user?.login?.toLowerCase() ?? null,
+      });
+      if (state.seenMembers.has(memberKey)) {
+        fail(`GitHub authors returned a duplicate member for commit ${commit}`);
+      }
+      state.seenMembers.add(memberKey);
+      if (
+        state.coauthorEmails.has(author.email.toLowerCase()) &&
+        isEligibleHandle(author.user?.login)
+      ) {
+        addHandles(state.handles, [author.user.login]);
+      }
+    }
+    if (state.seenMembers.size > state.expectedCount) {
+      fail(`GitHub authors returned more members than totalCount for commit ${commit}`);
+    }
+    if (connection.pageInfo.hasNextPage) {
+      const cursor = connection.pageInfo.endCursor;
+      if (state.seenCursors.has(cursor)) {
+        fail(`GitHub authors repeated cursor ${cursor} for commit ${commit}`);
+      }
+      state.seenCursors.add(cursor);
+      pending.push({ commit, cursor });
+    }
+  }
+
+  function queryFor(items) {
+    return `query { ${items
       .map(
-        (commit, offset) =>
-          `c${index + offset}: repository(owner: "openclaw", name: "openclaw") {
-            object(expression: ${JSON.stringify(commit.hash)}) {
+        (item, offset) =>
+          `c${offset}: repository(owner: "openclaw", name: "openclaw") {
+            object(expression: ${JSON.stringify(item.commit)}) {
               ... on Commit {
-                authors(first: 20) {
+                authors(first: 100${item.cursor ? `, after: ${JSON.stringify(item.cursor)}` : ""}) {
+                  totalCount
                   nodes {
                     email
                     user { login }
                   }
+                  pageInfo { hasNextPage endCursor }
                 }
               }
             }
           }`,
       )
-      .join("\n");
-    const data = graphql(`query { ${fields} }`);
-    for (let offset = 0; offset < chunk.length; offset += 1) {
-      const coauthorEmails = new Set(
-        chunk[offset].coauthorEmails.map((email) => email.toLowerCase()),
-      );
-      const handles =
-        data[`c${index + offset}`]?.object?.authors?.nodes
-          .filter((author) => coauthorEmails.has(author.email?.toLowerCase()))
-          .map((author) => author.user?.login)
-          .filter(isEligibleHandle) ?? [];
-      resolved.set(chunk[offset].hash, handles);
+      .join("\n")} }`;
+  }
+
+  for (let index = 0; index < commitsWithCoauthors.length; index += 40) {
+    const items = commitsWithCoauthors.slice(index, index + 40).map((commit) => ({
+      commit: commit.hash,
+    }));
+    const data = fetchPage(queryFor(items));
+    for (let offset = 0; offset < items.length; offset += 1) {
+      appendPage(items[offset].commit, data?.[`c${offset}`]?.object?.authors);
     }
   }
-  return resolved;
+  while (pending.length > 0) {
+    const items = pending.splice(0, 20);
+    const data = fetchPage(queryFor(items));
+    for (let offset = 0; offset < items.length; offset += 1) {
+      appendPage(items[offset].commit, data?.[`c${offset}`]?.object?.authors);
+    }
+  }
+  for (const [commit, state] of states) {
+    if (state.seenMembers.size !== state.expectedCount) {
+      fail(
+        `GitHub authors did not return ${state.expectedCount} complete unique members for commit ${commit}`,
+      );
+    }
+  }
+  return new Map([...states].map(([commit, state]) => [commit, state.handles]));
 }
 
 function withDirectCommitAuthors(commits, resolvedAuthors) {
@@ -1298,7 +2245,7 @@ function contributionRelationships(source, nodes, resolvedContributors) {
   for (const commit of source.activeCommits) {
     const pullRequests = commit.pullRequests;
     const issues = issueEntries(commit.closingReferences, nodes);
-    if (pullRequests.length === 0) {
+    if (commit.manifestDirect) {
       const authorHandle = commit.authorHandle
         ? resolvedContributors.get(commit.authorHandle.toLowerCase())
         : undefined;
@@ -1318,9 +2265,8 @@ function contributionRelationships(source, nodes, resolvedContributors) {
         contributors,
         issues,
       });
-      continue;
     }
-    if (issues.length === 0) {
+    if (pullRequests.length === 0 || issues.length === 0) {
       continue;
     }
     for (const number of pullRequests) {
@@ -1356,9 +2302,6 @@ export function ledgerFor(
   relationships,
   priorRecord,
   sourcePullRequests,
-  sourceReferences,
-  noteReferences,
-  legacyIssuePullRequests,
   revertedReferences,
   shippedBaselines,
   targetTimestamp,
@@ -1379,13 +2322,7 @@ export function ledgerFor(
     };
   });
 
-  const recordedPullRequests = new Set([
-    ...sourcePullRequests,
-    ...sourceReferences,
-    ...noteReferences,
-    ...legacyIssuePullRequests,
-    ...priorRecord.pullRequests.keys(),
-  ]);
+  const recordedPullRequests = new Set([...sourcePullRequests, ...priorRecord.pullRequests.keys()]);
   const pullRequests = entries.filter(
     (entry) =>
       entry.type === "PullRequest" &&
@@ -1447,7 +2384,7 @@ export function ledgerFor(
 
 function replaceLedger(changelog, section, ledger, pullRequests, directCommits) {
   const beforeLedger = completeEditorialCredits(
-    section.source.replace(/\n+### Complete contribution (?:ledger|record)[\s\S]*$/m, "").trimEnd(),
+    sourceBeforeContributionRecord(section.source, "release section"),
     pullRequests,
     directCommits,
   );
@@ -1478,32 +2415,63 @@ export function highlightCountError(sectionSource) {
     : `### Highlights must contain 5-8 top-level bullets; found ${count}`;
 }
 
-export function ledgerChecks(section, pullRequests, nodes, directCommits, shippedBaselines = []) {
+export function ledgerChecks(
+  section,
+  pullRequests,
+  nodes,
+  directCommits,
+  shippedBaselines = [],
+  expectedRange,
+) {
   const errors = [];
   let sectionReferences = referencesIn(section.source);
   if (/@undefined\b/i.test(section.source)) {
     errors.push("release section contains invalid @undefined contributor credit");
   }
-  if (!section.source.includes("### Highlights")) {
+  const highlightsHeadings = exactHeadingMatches(section.source, "### Highlights");
+  if (highlightsHeadings.length === 0) {
     errors.push("missing ### Highlights");
+  } else if (highlightsHeadings.length !== 1) {
+    errors.push(`### Highlights must appear exactly once; found ${highlightsHeadings.length}`);
   } else {
     const error = highlightCountError(section.source);
     if (error) {
       errors.push(error);
     }
   }
-  if (!section.source.includes("### Changes")) {
+  const changesHeadings = exactHeadingMatches(section.source, "### Changes");
+  if (changesHeadings.length === 0) {
     errors.push("missing ### Changes");
+  } else if (changesHeadings.length !== 1) {
+    errors.push(`### Changes must appear exactly once; found ${changesHeadings.length}`);
   }
-  if (!section.source.includes("### Fixes")) {
+  const fixesHeadings = exactHeadingMatches(section.source, "### Fixes");
+  if (fixesHeadings.length === 0) {
     errors.push("missing ### Fixes");
+  } else if (fixesHeadings.length !== 1) {
+    errors.push(`### Fixes must appear exactly once; found ${fixesHeadings.length}`);
   }
-  const ledgerStart = section.source.indexOf("### Complete contribution record");
-  if (ledgerStart < 0) {
+  const recordHeadings = exactHeadingMatches(section.source, "### Complete contribution record");
+  if (recordHeadings.length === 0) {
     errors.push("missing ### Complete contribution record");
     return errors;
   }
+  const ledgerStart = recordHeadings[0].index;
   const ledger = section.source.slice(ledgerStart);
+  let exactRecord;
+  if (!expectedRange) {
+    errors.push("release section expected contribution record range is missing");
+  }
+  try {
+    exactRecord = completeContributionRecord(section, "release section", expectedRange);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+  if (exactRecord && exactRecord.rows.size !== pullRequests.length) {
+    errors.push(
+      `release section contribution record contains ${exactRecord.rows.size} PR rows but expected ${pullRequests.length}`,
+    );
+  }
   const expectedShippedBaselineLine = formatShippedBaselineExclusions(shippedBaselines);
   try {
     const sectionShippedBaselineLine = formatShippedBaselineExclusions(
@@ -1540,15 +2508,15 @@ export function ledgerChecks(section, pullRequests, nodes, directCommits, shippe
     }
   }
   for (const entry of pullRequests) {
-    const line = ledger
-      .split("\n")
-      .find((candidate) => candidate.startsWith(`- **PR #${entry.number}**`));
+    const line =
+      exactRecord?.rows.get(entry.number) ??
+      ledger.split("\n").find((candidate) => candidate.startsWith(`- **PR #${entry.number}**`));
     if (!line) {
       errors.push(`missing contribution record for PR #${entry.number}`);
       continue;
     }
     for (const handle of entry.thanks) {
-      if (!line.toLowerCase().includes(`@${handle.toLowerCase()}`)) {
+      if (!creditsHandle(line, handle)) {
         errors.push(`missing Thanks @${handle} for #${entry.number}`);
       }
     }
@@ -1593,7 +2561,7 @@ export function ledgerChecks(section, pullRequests, nodes, directCommits, shippe
         continue;
       }
       for (const handle of entry.thanks) {
-        if (!line.toLowerCase().includes(`@${handle.toLowerCase()}`)) {
+        if (!creditsHandle(line, handle)) {
           errors.push(`missing editorial Thanks @${handle} for PR #${entry.number}`);
         }
       }
@@ -1604,7 +2572,7 @@ export function ledgerChecks(section, pullRequests, nodes, directCommits, shippe
       continue;
     }
     for (const handle of directCommitCreditsForLine(line, directCommits)) {
-      if (!line.toLowerCase().includes(`@${handle.toLowerCase()}`)) {
+      if (!creditsHandle(line, handle)) {
         errors.push(`missing editorial Thanks @${handle} for directly landed work`);
       }
     }
@@ -1617,8 +2585,7 @@ export function ledgerChecks(section, pullRequests, nodes, directCommits, shippe
     }
     for (const handle of thanksFor(node, [])) {
       const credited = lines.some(
-        (line) =>
-          line.includes(`#${number}`) && line.toLowerCase().includes(`@${handle.toLowerCase()}`),
+        (line) => referencesIn(line).includes(number) && creditsHandle(line, handle),
       );
       if (!credited) {
         errors.push(`missing Thanks @${handle} for issue #${number}`);
@@ -1628,10 +2595,137 @@ export function ledgerChecks(section, pullRequests, nodes, directCommits, shippe
   return errors;
 }
 
-function manifestFor(options, source, ledger, directCommitRecords) {
+function summarizedNumbers(numbers) {
+  const members = [...new Set(numbers)].toSorted((left, right) => left - right);
+  return {
+    count: members.length,
+    members,
+    sha256: createHash("sha256")
+      .update(members.map((number) => `${number}\n`).join(""))
+      .digest("hex"),
+  };
+}
+
+function summarizedRecords(records) {
+  const serialized = records.map((record) => JSON.stringify(record)).toSorted();
+  if (new Set(serialized).size !== serialized.length) {
+    fail("release reconciliation evidence records contain duplicates");
+  }
+  return {
+    count: serialized.length,
+    records: serialized.map((record) => JSON.parse(record)),
+    sha256: createHash("sha256")
+      .update(serialized.map((record) => `${record}\n`).join(""))
+      .digest("hex"),
+  };
+}
+
+function targetCommitsForPullRequest(source, number) {
+  return source.inventory.commits
+    .filter((commit) => commit.pullRequests.includes(number))
+    .map((commit) => commit.commit)
+    .toSorted();
+}
+
+export function ledgerReconciliationFor(
+  source,
+  renderedRecord,
+  generatedPullRequests = [],
+  allowedHistoricalPullRequests = [],
+  nodes = new Map(),
+) {
+  const canonical = new Set(source.inventory.partitions.pullRequests.included.members);
+  const current = new Set(renderedRecord.pullRequests.keys());
+  const generated = new Set(generatedPullRequests);
+  const allowedHistorical = new Set(allowedHistoricalPullRequests);
+  const missing = [...canonical].filter((number) => !current.has(number));
+  const stale = [...current].filter((number) => !canonical.has(number));
+  const generatedMissing = [...canonical].filter((number) => !generated.has(number));
+  const generatedUnexpected = [...generated].filter(
+    (number) => !canonical.has(number) && !allowedHistorical.has(number),
+  );
+  const missingRowEvidence = missing.map((number) => ({
+    number,
+    reason: "canonical-source-row-missing-from-current-record",
+    targetCommits: targetCommitsForPullRequest(source, number),
+  }));
+  const staleRowEvidence = stale.map((number) => {
+    const node = nodes.get(number);
+    const mergedAt =
+      node?.__typename === "PullRequest" && typeof node.mergedAt === "string"
+        ? new Date(node.mergedAt).toISOString()
+        : undefined;
+    const mergedTimestamp = mergedAt ? Date.parse(mergedAt) : Number.NaN;
+    const sourceContextCommits = source.inventory.commits
+      .filter((commit) => commit.references.includes(number))
+      .map((commit) => commit.commit)
+      .toSorted();
+    const crossRepositoryReferences = [
+      ...new Set(
+        source.inventory.commits.flatMap((commit) =>
+          referenceLabelsIn(`${commit.subject}\n${commit.body}`).filter(
+            (reference) =>
+              !reference.startsWith("#") &&
+              reference.endsWith(`#${number}`) &&
+              !reference.toLowerCase().startsWith(`${repo}#`),
+          ),
+        ),
+      ),
+    ].toSorted();
+    const category =
+      crossRepositoryReferences.length > 0
+        ? "cross-repository-reference-number-collision"
+        : sourceContextCommits.length > 0
+          ? "historical-context-reference-without-ownership"
+          : Number.isFinite(mergedTimestamp) &&
+              mergedTimestamp < source.inventory.range.mergeBaseTimestamp
+            ? "pre-range-row-without-source-evidence"
+            : node?.__typename === "PullRequest"
+              ? "pull-request-without-canonical-source-evidence"
+              : "non-pull-request-or-unresolved-row";
+    return {
+      category,
+      crossRepositoryReferences,
+      mergedAt,
+      number,
+      recordedReferences: renderedRecord.pullRequests.get(number)?.references ?? [],
+      sourceContextCommits,
+      title: node?.title,
+    };
+  });
+  return {
+    canonicalRows: summarizedNumbers(canonical),
+    coverage:
+      canonical.size === 0
+        ? 1
+        : [...canonical].filter((number) => current.has(number)).length / canonical.size,
+    currentRows: summarizedNumbers(current),
+    equation: `${current.size} - ${stale.length} + ${missing.length} = ${canonical.size}`,
+    generatedCoverage:
+      canonical.size === 0
+        ? 1
+        : [...canonical].filter((number) => generated.has(number)).length / canonical.size,
+    generatedMissingRows: summarizedNumbers(generatedMissing),
+    generatedRows: summarizedNumbers(generated),
+    generatedUnexpectedRows: summarizedNumbers(generatedUnexpected),
+    missingRowEvidence: summarizedRecords(missingRowEvidence),
+    missingRows: summarizedNumbers(missing),
+    staleRowEvidence: summarizedRecords(staleRowEvidence),
+    staleRows: summarizedNumbers(stale),
+  };
+}
+
+function manifestFor(
+  options,
+  source,
+  ledger,
+  directCommitRecords,
+  reconciliation,
+  { changelogSha256, releaseSectionSha256 },
+) {
   const directCommits = directCommitRecords.map((commit) => ({
     ...editorialClassification(commit.subject),
-    commit: commit.hash.slice(0, 12),
+    commit: commit.hash,
     subject: commit.subject,
     references: commit.references,
     author: commit.author,
@@ -1643,9 +2737,43 @@ function manifestFor(options, source, ledger, directCommitRecords) {
     })),
   }));
   const unlinkedCommits = directCommits.filter((commit) => commit.references.length === 0);
+  const generatedManifestDirect = {
+    count: directCommits.length,
+    members: directCommits.map((commit) => commit.commit).toSorted(),
+    sha256: createHash("sha256")
+      .update(
+        directCommits
+          .map((commit) => commit.commit)
+          .toSorted()
+          .map((commit) => `${commit}\n`)
+          .join(""),
+      )
+      .digest("hex"),
+  };
+  const inventoryManifestDirect = source.inventory.partitions.commits.manifestDirect;
+  if (
+    generatedManifestDirect.count !== inventoryManifestDirect.count ||
+    generatedManifestDirect.sha256 !== inventoryManifestDirect.sha256
+  ) {
+    fail("generated direct-commit ledger does not match the source inventory");
+  }
   return {
-    schemaVersion: 2,
+    schemaVersion: 4,
+    artifacts: {
+      changelogSha256,
+      releaseSectionSha256,
+    },
     base: options.base,
+    finalTarget: source.finalTarget,
+    inventory: source.inventory,
+    directReconciliation: {
+      equation: source.inventory.partitions.directReconciliation.equation,
+      exclusiveDirect: source.inventory.partitions.commits.exclusiveDirect,
+      generatedManifestDirect,
+      inventoryManifestDirect,
+      ownershipOverlap: source.inventory.partitions.commits.directOwnershipOverlap,
+    },
+    reconciliation,
     target: options.target,
     mergeBase: source.mergeBase,
     version: options.version,
@@ -1705,17 +2833,25 @@ function main() {
     printUsage();
     return;
   }
-  let changelog = readFileSync("CHANGELOG.md", "utf8");
+  const changelogSnapshot = fileSnapshot("CHANGELOG.md");
+  if (!changelogSnapshot.exists) {
+    fail("CHANGELOG.md does not exist");
+  }
+  if (
+    options.manifestPath &&
+    canonicalFilesystemPath(options.manifestPath) === canonicalFilesystemPath("CHANGELOG.md")
+  ) {
+    fail("--manifest must not alias CHANGELOG.md");
+  }
+  const manifestSnapshot = options.manifestPath ? fileSnapshot(options.manifestPath) : undefined;
+  let changelog = changelogSnapshot.bytes.toString("utf8");
   let section = sectionFor(changelog, options.version);
-  const source = sourceCommits(options.base, options.target);
+  const source = sourceCommits(options);
   const shippedBaselineRecords = options.shippedRefs.map(shippedBaselineFor);
-  const shippedExclusions = subtractShippedPullRequests(source, shippedBaselineRecords);
+  const shippedExclusions = exactShippedPullRequestExclusions(source, shippedBaselineRecords);
   source.shippedBaselines = shippedExclusions.baselines;
-  const preexistingNotes = section.source.replace(
-    /\n+### Complete contribution (?:ledger|record)[\s\S]*$/m,
-    "",
-  );
-  const noteReferences = referencesIn(preexistingNotes);
+  const preexistingNotes = sourceBeforeContributionRecord(section.source, "release section");
+  const noteReferences = releaseNoteReferences(preexistingNotes, shippedExclusions.baselines);
   const revertedNoteReferences = noteReferences.filter((number) =>
     source.revertedReferences.has(number),
   );
@@ -1742,16 +2878,37 @@ function main() {
     ...source.revertedReferences,
     ...shippedExclusions.pullRequests,
   ]);
-  const effectiveRenderedRecord = options.writeLedger
-    ? withoutExcludedContributionRecords(renderedRecord, excludedRecordedReferences)
-    : renderedRecord;
-  const effectiveRenderedRecordReferences =
-    contributionRecordMetadataReferences(effectiveRenderedRecord);
+  // A rewrite replaces the generated record wholesale. Validate existing rows only
+  // in audit mode so stale rows cannot prevent the command that removes them.
+  const effectiveRenderedRecordReferences = options.writeLedger ? [] : renderedRecordReferences;
   let priorRecord = { legacyIssues: new Map(), pullRequests: new Map() };
+  let priorRecordTarget;
   if (options.seedRef) {
     const seedChangelog = git(["show", `${options.seedRef}:CHANGELOG.md`]);
     const seedSection = sectionFor(seedChangelog, options.version);
-    priorRecord = contributionRecordFor(seedSection);
+    const seed = completeContributionRecord(seedSection, `seed ref ${options.seedRef}`);
+    if (seed.base !== options.base) {
+      fail(
+        `seed ref ${options.seedRef} contribution record base mismatch: expected ${options.base}, found ${seed.base}`,
+      );
+    }
+    if (
+      !isCommitAncestor(seed.target, options.seedRef) ||
+      !isCommitAncestor(seed.target, source.target)
+    ) {
+      fail(
+        `seed ref ${options.seedRef} contribution target ${seed.target} is not an ancestor of both the seed and current source target`,
+      );
+    }
+    const targetTimestamp = Number(git(["show", "-s", "--format=%ct", `${seed.target}^{commit}`]));
+    if (!Number.isSafeInteger(targetTimestamp) || targetTimestamp < 0) {
+      fail(`seed ref ${options.seedRef} has an invalid contribution target timestamp`);
+    }
+    priorRecordTarget = {
+      commit: seed.target,
+      timestamp: targetTimestamp * 1_000,
+    };
+    priorRecord = seed.record;
   }
   priorRecord = withoutExcludedContributionRecords(priorRecord, excludedRecordedReferences);
   const recordedReferences = contributionRecordMetadataReferences(priorRecord);
@@ -1774,7 +2931,6 @@ function main() {
     noteReferences,
     recordedReferences: effectiveRenderedRecordReferences,
     sourcePullRequests: source.pullRequests,
-    sourceReferences: source.references,
     seededPullRequests: new Set(priorRecord.pullRequests.keys()),
     nodes,
   });
@@ -1809,17 +2965,40 @@ function main() {
   appendReferences(resolvedReferences, titleReferenceNumbers);
   appendReferences(resolvedReferences, closingIssueNumbers);
   nodes = resolveReferences(resolvedReferences);
+  const relationshipDrift = [
+    ...unresolvedRelationshipMembers(
+      nodes,
+      references.filter((number) => nodes.get(number)?.__typename === "PullRequest"),
+      "closingIssuesReferences",
+    ),
+    ...unresolvedRelationshipMembers(
+      nodes,
+      priorRecord.legacyIssues.keys(),
+      "closedByPullRequestsReferences",
+    ),
+  ];
+  if (relationshipDrift.length > 0) {
+    fail(
+      `GitHub relationships changed while resolving release references: ${relationshipDrift
+        .map(
+          (entry) =>
+            `#${entry.source} ${entry.connectionName} now includes unresolved #${entry.member}`,
+        )
+        .join(", ")}; rerun the verifier`,
+    );
+  }
   const invalidRecordedPullRequests = [...priorRecord.pullRequests.keys()].filter((number) => {
     const node = nodes.get(number);
     return (
       node?.__typename !== "PullRequest" ||
       !node.mergedAt ||
-      (!source.pullRequests.has(number) && !mergedByTarget(node.mergedAt, source.targetTimestamp))
+      !priorRecordTarget ||
+      !pullRequestMergedByTarget(node, priorRecordTarget.commit, priorRecordTarget.timestamp)
     );
   });
-  if (!options.writeLedger && invalidRecordedPullRequests.length > 0) {
+  if (invalidRecordedPullRequests.length > 0) {
     fail(
-      `contribution record contains unresolved or unmerged PRs: ${invalidRecordedPullRequests
+      `seed contribution record contains unresolved PRs or PRs merged after its claimed target: ${invalidRecordedPullRequests
         .map((number) => `#${number}`)
         .join(", ")}`,
     );
@@ -1838,7 +3017,6 @@ function main() {
   ];
   const resolvedHandles = resolveGitHubHandles(contributorHandles);
   const relationships = contributionRelationships(source, nodes, resolvedHandles);
-  const unlinkedCommits = source.activeCommits.filter((commit) => commit.references.length === 0);
   const resolvedCommitAuthors = resolveDirectCommitAuthors(relationships.directCommits);
   relationships.directCommits = withDirectCommitAuthors(
     relationships.directCommits,
@@ -1854,45 +3032,79 @@ function main() {
     relationships,
     priorRecord,
     source.pullRequests,
-    source.references,
-    noteReferences,
-    legacyIssuePullRequests,
     source.revertedReferences,
     source.shippedBaselines,
     source.targetTimestamp,
   );
-  const manifest = manifestFor(
-    { ...options, target: source.target },
-    source,
-    ledger,
-    relationships.directCommits,
-  );
-
-  if (options.manifestPath) {
-    writeFileSync(options.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  }
-
+  let candidateChangelog = changelog;
+  let candidateSection = section;
   if (options.writeLedger) {
-    changelog = replaceLedger(
+    candidateChangelog = replaceLedger(
       changelog,
       section,
       ledger.ledger,
       ledger.pullRequests,
       relationships.directCommits,
     );
-    writeFileSync("CHANGELOG.md", changelog);
-    section = sectionFor(changelog, options.version);
+    candidateSection = sectionFor(candidateChangelog, options.version);
   }
+  const reconciliationRecord = options.writeLedger
+    ? completeContributionRecord(candidateSection, "generated release section", {
+        base: options.base,
+        target: source.target,
+      }).record
+    : renderedRecord;
+  const staleRenderedPullRequests = [...reconciliationRecord.pullRequests.keys()].filter(
+    (number) => !source.pullRequests.has(number),
+  );
+  const staleNodes =
+    staleRenderedPullRequests.length === 0
+      ? new Map()
+      : resolveReferences(staleRenderedPullRequests);
+  const reconciliationNodes = new Map([...nodes, ...staleNodes]);
+  const reconciliation = ledgerReconciliationFor(
+    source,
+    reconciliationRecord,
+    ledger.pullRequests.map((entry) => entry.number),
+    priorRecord.pullRequests.keys(),
+    reconciliationNodes,
+  );
+  const manifest = manifestFor(
+    { ...options, target: source.target },
+    source,
+    ledger,
+    relationships.directCommits,
+    reconciliation,
+    {
+      changelogSha256: createHash("sha256").update(candidateChangelog).digest("hex"),
+      releaseSectionSha256: createHash("sha256").update(candidateSection.source).digest("hex"),
+    },
+  );
 
   const errors = ledgerChecks(
-    section,
+    candidateSection,
     ledger.pullRequests,
     nodes,
     relationships.directCommits,
     source.shippedBaselines,
+    { base: options.base, target: source.target },
   );
+  if (reconciliation.generatedMissingRows.count > 0) {
+    errors.push(
+      `generated contribution record is missing canonical PRs: ${reconciliation.generatedMissingRows.members
+        .map((number) => `#${number}`)
+        .join(", ")}`,
+    );
+  }
+  if (reconciliation.generatedUnexpectedRows.count > 0) {
+    errors.push(
+      `generated contribution record contains non-canonical PRs outside --seed-ref: ${reconciliation.generatedUnexpectedRows.members
+        .map((number) => `#${number}`)
+        .join(", ")}`,
+    );
+  }
   const github = options.checkGithub
-    ? releaseChecks(changelog, options.version, options.releaseTags)
+    ? releaseChecks(candidateChangelog, options.version, options.releaseTags)
     : [];
   for (const check of github) {
     if (!check.matches) {
@@ -1901,9 +3113,35 @@ function main() {
       );
     }
   }
+  if (!options.writeLedger || errors.length === 0) {
+    const outputs = [];
+    if (options.writeLedger) {
+      outputs.push({
+        content: candidateChangelog,
+        expected: changelogSnapshot,
+        path: "CHANGELOG.md",
+      });
+    }
+    // The manifest is the commit marker. A crash may leave a new changelog
+    // with an old manifest, but never a new pass-looking manifest for old notes.
+    if (options.manifestPath) {
+      outputs.push({
+        content: `${JSON.stringify(manifest, null, 2)}\n`,
+        expected: manifestSnapshot,
+        path: options.manifestPath,
+      });
+    }
+    commitOutputTransaction(outputs);
+    if (options.writeLedger) {
+      changelog = candidateChangelog;
+      section = candidateSection;
+    }
+  }
 
   const result = {
     base: options.base,
+    finalTarget: source.finalTarget,
+    inventorySha256: source.inventory.sha256,
     target: source.target,
     mergeBase: source.mergeBase,
     version: options.version,
@@ -1916,6 +3154,7 @@ function main() {
       unlinkedCommits: manifest.unlinkedCommits.length,
     },
     github,
+    reconciliation,
     errors,
   };
   if (options.json) {
