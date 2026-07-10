@@ -618,6 +618,7 @@ function shouldRenderQueuedSendInThread(item: ChatQueueItem): boolean {
   }
   return (
     item.sendState === "waiting-model" ||
+    item.sendState === "waiting-idle" ||
     item.sendState === "sending" ||
     item.sendState === "waiting-reconnect"
   );
