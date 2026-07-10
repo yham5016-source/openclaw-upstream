@@ -663,7 +663,9 @@ export async function verifyBetaRelease(
         label: "Plugin ClawHub New",
         repo: args.repo,
         expectedWorkflowName: "Plugin ClawHub New",
-        expectedHeadBranch: clawHubWorkflowRef,
+        allowedHeadBranches: ["main", clawHubWorkflowRef].filter(
+          (branch): branch is string => branch !== undefined,
+        ),
         rerunFailed: false,
       }),
     );

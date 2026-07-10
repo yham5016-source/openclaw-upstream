@@ -972,6 +972,7 @@ jobs:
             clawhub_plan_path="${RUNNER_TEMP}/openclaw-release-clawhub-plan.json"
             plan_args=(
               --release-tag "${RELEASE_TAG}"
+              --release-sha "${TARGET_SHA}"
               --release-publish-branch "${CHILD_WORKFLOW_REF}"
               --release-publish-run-id "${GITHUB_RUN_ID}"
               --plugin-publish-scope "${PLUGIN_PUBLISH_SCOPE}"

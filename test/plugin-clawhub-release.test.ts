@@ -426,9 +426,7 @@ describe("collectPluginClawHubReleasePlan", () => {
       registryBaseUrl: "https://clawhub.ai",
     });
 
-    expect(plan.candidates.map((plugin) => plugin.packageName)).toEqual([
-      "@openclaw/demo-plugin",
-    ]);
+    expect(plan.candidates.map((plugin) => plugin.packageName)).toEqual(["@openclaw/demo-plugin"]);
   });
 
   it("fails closed when npm latest cannot be resolved", async () => {
@@ -1015,6 +1013,7 @@ describe("buildOpenClawReleaseClawHubPlan", () => {
     const plan = await buildOpenClawReleaseClawHubPlan(
       {
         releaseTag: "v2026.4.1-beta.1",
+        releaseSha: "a".repeat(40),
         releasePublishBranch: "main",
         releasePublishRunId: "12345",
         pluginPublishScope: "all-publishable",
@@ -1043,10 +1042,11 @@ describe("buildOpenClawReleaseClawHubPlan", () => {
     });
     expect(plan.bootstrap).toEqual({
       workflow: "plugin-clawhub-new.yml",
-      ref: "v2026.4.1-beta.1",
+      ref: "main",
       shouldDispatch: true,
       packages: ["@openclaw/demo-two", "@openclaw/demo-three"],
       inputs: {
+        ref: "a".repeat(40),
         plugins: "@openclaw/demo-two,@openclaw/demo-three",
         release_publish_run_id: "12345",
         release_publish_branch: "main",
@@ -1094,6 +1094,7 @@ describe("buildOpenClawReleaseClawHubPlan", () => {
     const plan = await buildOpenClawReleaseClawHubPlan(
       {
         releaseTag: "v2026.4.1-beta.1",
+        releaseSha: "b".repeat(40),
         releasePublishBranch: "release/2026.4.1",
         releasePublishRunId: "12345",
         pluginPublishScope: "selected",
@@ -1109,10 +1110,11 @@ describe("buildOpenClawReleaseClawHubPlan", () => {
     expect(plan.normal.shouldDispatch).toBe(false);
     expect(plan.bootstrap).toMatchObject({
       workflow: "plugin-clawhub-new.yml",
-      ref: "v2026.4.1-beta.1",
+      ref: "main",
       shouldDispatch: true,
       packages: ["@openclaw/demo-plugin"],
       inputs: {
+        ref: "b".repeat(40),
         plugins: "@openclaw/demo-plugin",
         release_publish_run_id: "12345",
         release_publish_branch: "release/2026.4.1",
@@ -1132,6 +1134,8 @@ describe("buildOpenClawReleaseClawHubPlan", () => {
       parseOpenClawReleaseClawHubPlanArgs([
         "--release-tag",
         "v2026.4.1-beta.1",
+        "--release-sha",
+        "c".repeat(40),
         "--release-publish-branch",
         "main",
         "--release-publish-run-id",
@@ -1301,7 +1305,10 @@ describe("plugin-clawhub-publish.sh", () => {
     );
 
     expect(output.trim()).toBe(
-      "usage: bash scripts/plugin-clawhub-publish.sh [--dry-run|--publish|--pack] <package-dir>",
+      [
+        "usage: bash scripts/plugin-clawhub-publish.sh [--dry-run|--publish|--pack] <package-dir>",
+        "       bash scripts/plugin-clawhub-publish.sh [--validate-packed|--publish-packed] <clawpack.tgz>",
+      ].join("\n"),
     );
   });
 

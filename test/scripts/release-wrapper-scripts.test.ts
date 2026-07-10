@@ -33,6 +33,8 @@ describe("release wrapper scripts", () => {
     const result = runTsxScript("scripts/openclaw-release-clawhub-plan.ts", [
       "--release-tag",
       "v2026.6.21-beta.1",
+      "--release-sha",
+      "a".repeat(40),
       "--release-publish-run-id",
       "123",
     ]);
