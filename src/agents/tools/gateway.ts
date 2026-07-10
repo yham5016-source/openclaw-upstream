@@ -337,6 +337,7 @@ export async function callGatewayTool<T = Record<string, unknown>>(
     expectFinal?: boolean;
     scopes?: OperatorScope[];
     requireAgentRuntimeIdentity?: boolean;
+    signal?: AbortSignal;
   },
 ) {
   const gateway = resolveGatewayOptions(opts);
@@ -366,6 +367,7 @@ export async function callGatewayTool<T = Record<string, unknown>>(
       method,
       params,
       timeoutMs: gateway.timeoutMs,
+      signal: extra?.signal,
       expectFinal: extra?.expectFinal,
       clientName: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
       clientDisplayName: "agent",
