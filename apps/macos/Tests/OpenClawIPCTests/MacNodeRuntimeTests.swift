@@ -94,20 +94,18 @@ struct MacNodeRuntimeTests {
 
     @MainActor
     final class ScreenSnapshotProbeServices: MacNodeRuntimeMainActorServices, @unchecked Sendable {
-        typealias SnapshotResult = (
-            data: Data,
-            format: OpenClawScreenSnapshotFormat,
-            width: Int,
-            height: Int,
-            displayFrameId: String)
-
         var snapshotCallCount = 0
         var receivedSnapshotParams: MacNodeScreenSnapshotParams?
-        var snapshotResult: SnapshotResult
+        var snapshotResult: ScreenSnapshotResult
         var snapshotError: Error?
 
         init(
-            snapshotResult: SnapshotResult = (Data("ok".utf8), .jpeg, 10, 10, "display-frame-test"),
+            snapshotResult: ScreenSnapshotResult = ScreenSnapshotResult(
+                data: Data("ok".utf8),
+                format: .jpeg,
+                width: 10,
+                height: 10,
+                displayFrameId: "display-frame-test"),
             snapshotError: Error? = nil)
         {
             self.snapshotResult = snapshotResult
@@ -118,7 +116,7 @@ struct MacNodeRuntimeTests {
             screenIndex: Int?,
             maxWidth: Int?,
             quality: Double?,
-            format: OpenClawScreenSnapshotFormat?) async throws -> SnapshotResult
+            format: OpenClawScreenSnapshotFormat?) async throws -> ScreenSnapshotResult
         {
             self.snapshotCallCount += 1
             self.receivedSnapshotParams = MacNodeScreenSnapshotParams(
@@ -400,17 +398,17 @@ struct MacNodeRuntimeTests {
                 maxWidth: Int?,
                 quality: Double?,
                 format: OpenClawScreenSnapshotFormat?) async throws
-                -> (
-                    data: Data,
-                    format: OpenClawScreenSnapshotFormat,
-                    width: Int,
-                    height: Int,
-                    displayFrameId: String)
+                -> ScreenSnapshotResult
             {
                 _ = screenIndex
                 _ = maxWidth
                 _ = quality
-                return (Data("snapshot".utf8), format ?? .jpeg, 640, 360, "display-frame-test")
+                return ScreenSnapshotResult(
+                    data: Data("snapshot".utf8),
+                    format: format ?? .jpeg,
+                    width: 640,
+                    height: 360,
+                    displayFrameId: "display-frame-test")
             }
 
             func recordScreen(
@@ -485,18 +483,18 @@ struct MacNodeRuntimeTests {
                 maxWidth: Int?,
                 quality: Double?,
                 format: OpenClawScreenSnapshotFormat?) async throws
-                -> (
-                    data: Data,
-                    format: OpenClawScreenSnapshotFormat,
-                    width: Int,
-                    height: Int,
-                    displayFrameId: String)
+                -> ScreenSnapshotResult
             {
                 self.snapshotCalledAtMs = Int64(Date().timeIntervalSince1970 * 1000)
                 #expect(screenIndex == 0)
                 #expect(maxWidth == 800)
                 #expect(quality == 0.5)
-                return (Data("ok".utf8), format ?? .jpeg, 800, 450, "display-frame-test")
+                return ScreenSnapshotResult(
+                    data: Data("ok".utf8),
+                    format: format ?? .jpeg,
+                    width: 800,
+                    height: 450,
+                    displayFrameId: "display-frame-test")
             }
 
             func recordScreen(
@@ -641,14 +639,14 @@ struct MacNodeRuntimeTests {
             maxWidth _: Int?,
             quality _: Double?,
             format: OpenClawScreenSnapshotFormat?) async throws
-            -> (
-                data: Data,
-                format: OpenClawScreenSnapshotFormat,
-                width: Int,
-                height: Int,
-                displayFrameId: String)
+            -> ScreenSnapshotResult
         {
-            (Data("ok".utf8), format ?? .jpeg, 10, 10, "display-frame-test")
+            ScreenSnapshotResult(
+                data: Data("ok".utf8),
+                format: format ?? .jpeg,
+                width: 10,
+                height: 10,
+                displayFrameId: "display-frame-test")
         }
 
         func recordScreen(
@@ -961,12 +959,12 @@ struct MacNodeRuntimeTests {
     @Test func `handle invoke screen snapshot rejects raw payloads above base64 ceiling`() async {
         let payloadSize = 19_660_801
         let services = await MainActor.run {
-            ScreenSnapshotProbeServices(snapshotResult: (
-                Data(repeating: 0x41, count: payloadSize),
-                .jpeg,
-                4000,
-                3000,
-                "display-frame-test"))
+            ScreenSnapshotProbeServices(snapshotResult: ScreenSnapshotResult(
+                data: Data(repeating: 0x41, count: payloadSize),
+                format: .jpeg,
+                width: 4000,
+                height: 3000,
+                displayFrameId: "display-frame-test"))
         }
         let runtime = MacNodeRuntime(makeMainActorServices: { services })
 
@@ -986,12 +984,12 @@ struct MacNodeRuntimeTests {
     @Test func `handle invoke screen snapshot rejects escaped oversized outer frames`() async {
         let payloadSize = 12 * 1024 * 1024
         let services = await MainActor.run {
-            ScreenSnapshotProbeServices(snapshotResult: (
-                Data(repeating: 0xFF, count: payloadSize),
-                .png,
-                4000,
-                3000,
-                "display-frame-test"))
+            ScreenSnapshotProbeServices(snapshotResult: ScreenSnapshotResult(
+                data: Data(repeating: 0xFF, count: payloadSize),
+                format: .png,
+                width: 4000,
+                height: 3000,
+                displayFrameId: "display-frame-test"))
         }
         let runtime = MacNodeRuntime(makeMainActorServices: { services })
 
@@ -1011,12 +1009,12 @@ struct MacNodeRuntimeTests {
     @Test func `handle invoke screen snapshot accepts near-limit frames that fit`() async throws {
         let payloadSize = 19_660_100
         let services = await MainActor.run {
-            ScreenSnapshotProbeServices(snapshotResult: (
-                Data(repeating: 0x00, count: payloadSize),
-                .jpeg,
-                4000,
-                3000,
-                "display-frame-test"))
+            ScreenSnapshotProbeServices(snapshotResult: ScreenSnapshotResult(
+                data: Data(repeating: 0x00, count: payloadSize),
+                format: .jpeg,
+                width: 4000,
+                height: 3000,
+                displayFrameId: "display-frame-test"))
         }
         let runtime = MacNodeRuntime(makeMainActorServices: { services })
 

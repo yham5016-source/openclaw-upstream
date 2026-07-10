@@ -136,7 +136,6 @@ import {
   resolveOpenClawExecPolicyForCodexAppServer,
   shouldAutoApproveCodexAppServerApprovals,
   type CodexAppServerRuntimeOptions,
-  type OpenClawExecPolicyForCodexAppServer,
 } from "./config.js";
 import {
   type CodexProjectedContextRange,
@@ -2422,9 +2421,6 @@ export async function runCodexAppServerAttempt(
             threadId: thread.threadId,
             turnId,
             nativeHookRelay,
-            execPolicy,
-            execReviewerAgentId: sessionAgentId,
-            internalExecAutoReview: appServer.approvalsReviewer === "user",
             autoApprove: shouldAutoApproveCodexAppServerApprovals(appServer),
             signal: runAbortController.signal,
             onNativeToolFailureDisposition: (itemId, disposition) =>
@@ -2815,6 +2811,16 @@ export async function runCodexAppServerAttempt(
     latestStartupErrorNotification = undefined;
     rateLimitsRevisionBeforeLastTurnStart = readCodexRateLimitsRevision(client);
     activeTurnRoute.armTurn();
+    void emitCodexAppServerEvent(params, {
+      stream: "codex_app_server.lifecycle",
+      data: {
+        phase: "turn_starting",
+        threadId: thread.threadId,
+        model: turnStartParams.model,
+        effort: turnStartParams.effort,
+        collaborationEffort: turnStartParams.collaborationMode?.settings.reasoning_effort,
+      },
+    });
     let acceptedTurnId: string | undefined;
     try {
       const startedTurn = assertCodexTurnStartResponse(
@@ -2877,10 +2883,6 @@ export async function runCodexAppServerAttempt(
       event: buildLlmInputEvent(),
       ctx: hookContext,
       hookRunner,
-    });
-    void emitCodexAppServerEvent(params, {
-      stream: "codex_app_server.lifecycle",
-      data: { phase: "turn_starting", threadId: thread.threadId },
     });
     turn = await startCodexTurn();
   } catch (error) {
@@ -3909,9 +3911,6 @@ function handleApprovalRequest(params: {
   threadId: string;
   turnId: string;
   nativeHookRelay?: NativeHookRelayRegistrationHandle;
-  execPolicy?: Pick<OpenClawExecPolicyForCodexAppServer, "mode">;
-  execReviewerAgentId?: string;
-  internalExecAutoReview?: boolean;
   autoApprove?: boolean;
   signal?: AbortSignal;
   onNativeToolFailureDisposition?: Parameters<
@@ -3925,9 +3924,6 @@ function handleApprovalRequest(params: {
     threadId: params.threadId,
     turnId: params.turnId,
     nativeHookRelay: params.nativeHookRelay,
-    execPolicy: params.execPolicy,
-    execReviewerAgentId: params.execReviewerAgentId,
-    internalExecAutoReview: params.internalExecAutoReview,
     autoApprove: params.autoApprove,
     signal: params.signal,
     onNativeToolFailureDisposition: params.onNativeToolFailureDisposition,

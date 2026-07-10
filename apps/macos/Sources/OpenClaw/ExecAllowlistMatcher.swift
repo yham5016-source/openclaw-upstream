@@ -31,7 +31,7 @@ enum ExecAllowlistMatcher {
                     }
                     continue
                 }
-                if let argv = resolution.argv, matchesArgPattern(argPattern, argv: argv) {
+                if let argv = resolution.argv, self.matchesArgPattern(argPattern, argv: argv) {
                     return entry
                 }
             case .invalid:

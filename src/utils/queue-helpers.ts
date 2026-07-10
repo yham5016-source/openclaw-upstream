@@ -106,6 +106,12 @@ export function countPendingQueueItems<T>(items: readonly T[], inFlight?: Readon
   return items.reduce((count, item) => count + (inFlight.has(item) ? 0 : 1), 0);
 }
 
+type DrainQueueItemOptions<T> = {
+  inFlight?: Set<T>;
+  shouldRestoreOnError?: (item: T) => boolean;
+  onDiscard?: (item: T) => void;
+};
+
 /** Apply overflow policy before enqueueing another item. */
 export function applyQueueDropPolicy<T>(params: {
   queue: QueueState<T>;
@@ -113,6 +119,7 @@ export function applyQueueDropPolicy<T>(params: {
   summaryLimit?: number;
   onDrop?: (items: T[]) => void;
   inFlight?: ReadonlySet<T>;
+  isProtected?: (item: T) => boolean;
 }): boolean {
   const cap = params.queue.cap;
   const pendingCount = countPendingQueueItems(params.queue.items, params.inFlight);
@@ -123,15 +130,28 @@ export function applyQueueDropPolicy<T>(params: {
     return false;
   }
   const dropCount = pendingCount - cap + 1;
-  const dropped: T[] = [];
-  // Active identities remain in the shared array until delivery succeeds; evict only pending work.
-  for (let index = 0; dropped.length < dropCount; ) {
+  // Collect victim indices first. In-flight identities stay until delivery
+  // succeeds; protected priority runs (e.g. stranded-reply retries) also stay.
+  // Only mutate the queue when enough victims exist so a partial drop cannot
+  // admit overflow when the queue is full of in-flight/protected work.
+  const victimIndices: number[] = [];
+  for (
+    let index = 0;
+    index < params.queue.items.length && victimIndices.length < dropCount;
+    index += 1
+  ) {
     const item = params.queue.items[index];
-    if (params.inFlight?.has(item)) {
-      index += 1;
+    if (params.inFlight?.has(item) || params.isProtected?.(item) === true) {
       continue;
     }
-    dropped.push(...params.queue.items.splice(index, 1));
+    victimIndices.push(index);
+  }
+  if (victimIndices.length < dropCount) {
+    return false;
+  }
+  const dropped: T[] = [];
+  for (let i = victimIndices.length - 1; i >= 0; i -= 1) {
+    dropped.unshift(...params.queue.items.splice(victimIndices[i], 1));
   }
   params.onDrop?.(dropped);
   if (params.queue.dropPolicy === "summarize") {
@@ -200,7 +220,7 @@ export function removeQueuedItemsByRef<T>(items: T[], processed: readonly T[]): 
 export async function drainNextQueueItem<T>(
   items: T[],
   run: (item: T) => Promise<void>,
-  inFlight?: Set<T>,
+  options?: DrainQueueItemOptions<T>,
 ): Promise<boolean> {
   const next = items[0];
   if (!next) {
@@ -208,13 +228,19 @@ export async function drainNextQueueItem<T>(
   }
   // Mark the item as in-flight so applyQueueDropPolicy skips it during the
   // await window when the shared items array is still mutated by enqueuers.
-  inFlight?.add(next);
+  options?.inFlight?.add(next);
   try {
     await run(next);
     // Keep the identity protected until its successful by-reference removal.
     removeQueuedItemsByRef(items, [next]);
+  } catch (error) {
+    if (!(options?.shouldRestoreOnError?.(next) ?? true)) {
+      removeQueuedItemsByRef(items, [next]);
+      options?.onDiscard?.(next);
+    }
+    throw error;
   } finally {
-    inFlight?.delete(next);
+    options?.inFlight?.delete(next);
   }
   return true;
 }
@@ -226,7 +252,7 @@ async function drainCollectItemIfNeeded<T>(params: {
   setForceIndividualCollect?: (next: boolean) => void;
   items: T[];
   run: (item: T) => Promise<void>;
-  inFlight?: Set<T>;
+  reserveOptions?: DrainQueueItemOptions<T>;
 }): Promise<"skipped" | "drained" | "empty"> {
   if (!params.forceIndividualCollect && !params.isCrossChannel) {
     return "skipped";
@@ -235,7 +261,7 @@ async function drainCollectItemIfNeeded<T>(params: {
     // Once cross-channel items appear, future collection stays individual to preserve ordering.
     params.setForceIndividualCollect?.(true);
   }
-  const drained = await drainNextQueueItem(params.items, params.run, params.inFlight);
+  const drained = await drainNextQueueItem(params.items, params.run, params.reserveOptions);
   return drained ? "drained" : "empty";
 }
 
@@ -245,7 +271,7 @@ export async function drainCollectQueueStep<T>(params: {
   isCrossChannel: boolean;
   items: T[];
   run: (item: T) => Promise<void>;
-  inFlight?: Set<T>;
+  reserveOptions?: DrainQueueItemOptions<T>;
 }): Promise<"skipped" | "drained" | "empty"> {
   return await drainCollectItemIfNeeded({
     forceIndividualCollect: params.collectState.forceIndividualCollect,
@@ -255,7 +281,7 @@ export async function drainCollectQueueStep<T>(params: {
     },
     items: params.items,
     run: params.run,
-    inFlight: params.inFlight,
+    reserveOptions: params.reserveOptions,
   });
 }
 
