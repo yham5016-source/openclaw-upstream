@@ -1599,7 +1599,8 @@ jobs:
             echo "### Publish sequence"
             echo
             echo "- Workflow ref: \`${CHILD_WORKFLOW_REF}\`"
-            echo "- ClawHub workflow ref: release tag \`${RELEASE_TAG}\`"
+            echo "- Normal ClawHub workflow ref: release tag \`${RELEASE_TAG}\`"
+            echo "- ClawHub bootstrap workflow ref: trusted \`main\`, target \`${TARGET_SHA}\`"
             echo "- Release tag: \`${RELEASE_TAG}\`"
             echo "- Release SHA: \`${TARGET_SHA}\`"
             echo "- Release approval: this workflow job"

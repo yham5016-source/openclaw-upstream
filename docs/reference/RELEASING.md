@@ -503,6 +503,29 @@ gh workflow run openclaw-release-publish.yml \
 
 Use the lower-level `Plugin NPM Release` and `Plugin ClawHub Release` workflows only for focused repair or republish work. `OpenClaw Release Publish` rejects `plugin_publish_scope=selected` when `publish_openclaw_npm=true` so the core package cannot ship without every publishable official plugin, including `@openclaw/diffs-language-pack`. For a selected plugin repair, set `publish_openclaw_npm=false` with `plugin_publish_scope=selected` and `plugins=@openclaw/name`, or dispatch the child workflow directly.
 
+First-publish ClawHub bootstrap is the exception: dispatch `Plugin ClawHub New`
+from trusted `main` and pass the full target release SHA through `ref`.
+Never run the bootstrap workflow itself from the release tag or branch:
+
+```bash
+gh workflow run plugin-clawhub-new.yml \
+  --ref main \
+  -f plugins=@openclaw/name \
+  -f ref=<full-40-character-release-sha> \
+  -f dry_run=true
+```
+
+The dry run checks out and packs the target only in a secretless job. That job
+uploads one immutable artifact whose name, Actions artifact ID/digest,
+producer run/attempt, target SHA, and per-package tarball SHA-256/size are
+carried into the protected job. The protected job checks out trusted `main`
+tooling only, validates the artifact tuple through the GitHub API, downloads
+by exact artifact ID, rehashes every tarball, and publishes that exact file.
+Post-publish verification downloads the ClawHub artifact and requires the same
+SHA-256 and size. Existing-package trusted-publisher repair remains
+configure-only; it records historical artifact bytes without comparing them
+to a newly packed candidate.
+
 ## NPM workflow inputs
 
 `OpenClaw NPM Release` accepts these operator-controlled inputs:

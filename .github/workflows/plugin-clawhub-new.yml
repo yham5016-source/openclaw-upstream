@@ -72,6 +72,7 @@ jobs:
         id: ref
         env:
           TARGET_REF: ${{ inputs.ref }}
+          TRUSTED_PUBLISH_BRANCH: ${{ inputs.release_publish_branch || github.ref_name }}
         run: |
           set -euo pipefail
           [[ "${TARGET_REF}" =~ ^[a-f0-9]{40}$ ]] || {
@@ -81,6 +82,10 @@ jobs:
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
             '+refs/heads/release/*:refs/remotes/origin/release/*'
+          if [[ "${TRUSTED_PUBLISH_BRANCH}" =~ ^tideclaw/alpha/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}Z$ ]]; then
+            git fetch --no-tags origin \
+              "+refs/heads/${TRUSTED_PUBLISH_BRANCH}:refs/remotes/origin/${TRUSTED_PUBLISH_BRANCH}"
+          fi
           git cat-file -e "${TARGET_REF}^{commit}" || {
             echo "Unable to resolve requested publish ref: ${TARGET_REF}" >&2
             exit 1
@@ -324,11 +329,16 @@ jobs:
       - name: Checkout target revision
         env:
           TARGET_SHA: ${{ needs.resolve_bootstrap_plan.outputs.ref_revision }}
+          TRUSTED_PUBLISH_BRANCH: ${{ inputs.release_publish_branch || github.ref_name }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
             '+refs/heads/release/*:refs/remotes/origin/release/*'
+          if [[ "${TRUSTED_PUBLISH_BRANCH}" =~ ^tideclaw/alpha/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}Z$ ]]; then
+            git fetch --no-tags origin \
+              "+refs/heads/${TRUSTED_PUBLISH_BRANCH}:refs/remotes/origin/${TRUSTED_PUBLISH_BRANCH}"
+          fi
           git checkout --detach "${TARGET_SHA}"
 
       - name: Checkout trusted workflow tooling

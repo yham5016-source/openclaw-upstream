@@ -549,6 +549,12 @@ pnpm test:install:smoke
   `npm view <package-name> version dist-tags --json --prefer-online`; a 404 for
   a package newly added to the release is a release-prep blocker, not something
   to discover from the publish job.
+- Bootstrap a new ClawHub package only from the trusted workflow source:
+  `gh workflow run plugin-clawhub-new.yml --ref main -f plugins=@openclaw/name -f ref=<full-release-sha> -f dry_run=true`.
+  The workflow source stays on `main`; `ref` is the exact release target. Keep
+  the run dry until its immutable artifact ID/name/digest and per-tarball
+  SHA-256/size are recorded. A real run must publish the exact downloaded
+  tarball and prove byte-identical ClawHub registry readback.
 - Use `pnpm qa:otel:smoke` when release validation needs telemetry coverage.
   It starts a local OTLP/HTTP trace receiver, runs QA-lab's
   `otel-trace-smoke`, and checks span names plus content/identifier redaction

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -251,7 +251,10 @@ export async function verifyClawHubBootstrapArtifactManifest(options) {
     }
     const artifactPath = requireString(rawEntry.artifactPath, `${entry.packageName}.artifactPath`);
     const expectedPrefix = `packages/${packageSlug(entry.packageName)}/`;
-    if (!artifactPath.startsWith(expectedPrefix) || !artifactPath.endsWith(".tgz")) {
+    if (
+      artifactPath !== `${expectedPrefix}${basename(artifactPath)}` ||
+      !artifactPath.endsWith(".tgz")
+    ) {
       fail(`${entry.packageName} artifactPath is invalid.`);
     }
     const expectedSha = requirePattern(
