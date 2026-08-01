@@ -133,7 +133,8 @@ export function replayHeadTransitionLedger(
 
 // ── Validation ────────────────────────────────────────────────────────
 
-function validateLedgerEntry(entry: HeadTransitionLedgerEntry): ValidationResult {
+/** Exported so alternate ledger backends (e.g. SQLite) share one validation rule. */
+export function validateLedgerEntry(entry: HeadTransitionLedgerEntry): ValidationResult {
   if (!Number.isFinite(entry.recordedAtMs) || entry.recordedAtMs < 0) {
     return { ok: false, reason: "recordedAtMs must be a non-negative finite number" };
   }
@@ -173,14 +174,16 @@ function validatePayload(entry: HeadTransitionLedgerEntry): ValidationResult {
   }
 }
 
-function payloadKeyForEntry(entry: HeadTransitionLedgerEntry): string {
+/** Exported so alternate ledger backends can enforce the same key-match rule. */
+export function payloadKeyForEntry(entry: HeadTransitionLedgerEntry): string {
   if (entry.kind === "worker_result") {
     return `${entry.payload.commandIdempotencyKey}:${entry.payload.workerId}`;
   }
   return entry.payload.idempotencyKey;
 }
 
-function targetMapForKind(
+/** Exported so alternate ledger backends bucket replayed rows into the same maps. */
+export function targetMapForKind(
   snapshot: HeadTransitionLedgerSnapshot,
   kind: HeadTransitionLedgerEntryKind,
 ):
