@@ -3,8 +3,8 @@
 // OpenClaw state DB or an agent DB -- see docs/architecture/langgraph-head-transition-v01.md
 // Open Questions for the still-undecided checkpoint-store home.
 import type { DatabaseSync } from "node:sqlite";
-import { DatabaseSync as NodeSqliteDatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 import type { HeadTransitionInboundEvent } from "./contracts.js";
 import {
   targetMapForKind,
@@ -32,7 +32,7 @@ function getLedgerKysely(db: DatabaseSync) {
 
 /** Open (creating if needed) a SQLite-backed Head transition ledger. */
 export function openHeadTransitionSqliteLedger(location: string): DatabaseSync {
-  const db = new NodeSqliteDatabaseSync(location);
+  const db = openNodeSqliteDatabase(location);
   db.exec(`
     CREATE TABLE IF NOT EXISTS head_transition_ledger (
       idempotency_key TEXT PRIMARY KEY,

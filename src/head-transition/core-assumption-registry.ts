@@ -3,8 +3,8 @@
 // rejection and normalization-version migration, not event replay.
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { DatabaseSync as NodeSqliteDatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 
 export type CoreAssumptionKind = "causal" | "constraint" | "environment" | "data" | "method";
 export type CoreAssumptionStatus = "proposed" | "active" | "challenged" | "retired" | "superseded";
@@ -75,7 +75,7 @@ export function computeNormalizedHash(
 }
 
 export function openCoreAssumptionRegistry(location: string): DatabaseSync {
-  const db = new NodeSqliteDatabaseSync(location);
+  const db = openNodeSqliteDatabase(location);
   db.exec(`
     CREATE TABLE IF NOT EXISTS core_assumptions (
       assumption_id TEXT PRIMARY KEY,

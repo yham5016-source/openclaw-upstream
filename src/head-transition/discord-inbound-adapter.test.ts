@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { DiscordMessagePreflightContext } from "../../extensions/discord/src/monitor/message-handler.preflight.types.js";
 import {
   buildHeadTransitionDiscordInboundEvent,
   buildHeadTransitionDiscordInboundIdempotencyKey,
@@ -25,18 +24,7 @@ describe("buildHeadTransitionDiscordInboundEvent", () => {
       sender: {
         id: "user-1",
       },
-    } as Pick<
-      DiscordMessagePreflightContext,
-      | "accountId"
-      | "baseText"
-      | "canonicalMessageId"
-      | "inboundEventKind"
-      | "message"
-      | "messageChannelId"
-      | "messageText"
-      | "route"
-      | "sender"
-    >);
+    });
 
     expect(event).toMatchObject({
       version: 1,
@@ -86,17 +74,7 @@ describe("buildHeadTransitionDiscordInboundEvent", () => {
         sender: {
           id: "user-1",
         },
-      } as Pick<
-        DiscordMessagePreflightContext,
-        | "accountId"
-        | "baseText"
-        | "inboundEventKind"
-        | "message"
-        | "messageChannelId"
-        | "messageText"
-        | "route"
-        | "sender"
-      >),
+      }),
     ).toThrow("occurredAtMs must be a non-negative finite number");
   });
 });

@@ -350,6 +350,11 @@ const config = {
     "**/live-*.ts",
     "src/secrets/credential-matrix.ts",
     "src/shared/text/assistant-visible-text.ts",
+    // langgraph-head-transition-v01 spike: Caveman envelope/payload/grading/
+    // task-class/assumption-registry modules and their ledger, kept
+    // deliberately unwired pending a follow-up integration PR (see
+    // docs/architecture/langgraph-head-transition-v01.md).
+    "src/head-transition/**",
     bundledPluginFile("telegram", "src/bot/reply-threading.ts"),
     bundledPluginFile("telegram", "src/draft-chunking.ts"),
   ],
