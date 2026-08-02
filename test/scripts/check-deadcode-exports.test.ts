@@ -71,6 +71,7 @@ describe("check-deadcode-exports", () => {
       "dist/**",
       "packages/*/dist/**",
       "**/.boundary-stubs/**",
+      "src/head-transition/**",
     ]);
     expect(allExportsKnipConfig.ignoreIssues).toHaveProperty("test/fixtures/ts-topology/basic/**");
     expect(knipConfig.workspaces["."].project).toContain("scripts/**/*.{js,mjs,cjs,ts,mts,cts}!");

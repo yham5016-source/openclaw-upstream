@@ -114,6 +114,8 @@ const rawSqliteAllowPathGroups = {
     "src/config/sessions/session-accessor.sqlite-entry-cache.ts",
   ],
   "device pairing cache connection-local validity counters": ["src/infra/device-pairing-store.ts"],
+  "head-transition spike ledger/registry: DDL bootstrap and BEGIN IMMEDIATE/COMMIT/ROLLBACK transaction control Kysely's compile-only dialect cannot execute":
+    ["src/head-transition/sqlite-ledger.ts", "src/head-transition/core-assumption-registry.ts"],
   "Kysely-backed stores that own a DatabaseSync boundary": [
     "src/acp/event-ledger.ts",
     "src/state/user-profiles.ts",
