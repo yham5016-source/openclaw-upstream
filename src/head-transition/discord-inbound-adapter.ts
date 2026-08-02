@@ -34,7 +34,7 @@ export function buildHeadTransitionDiscordInboundEvent(
     sessionKey: ctx.route.sessionKey,
     messageId,
     senderId: ctx.sender.id,
-    occurredAtMs: Date.parse(ctx.message.timestamp),
+    occurredAtMs: Date.parse(ctx.message.timestamp ?? ""),
     body: ctx.messageText || ctx.baseText,
     metadata: {
       agentId: ctx.route.agentId,

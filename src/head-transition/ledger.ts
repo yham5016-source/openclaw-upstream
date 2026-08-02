@@ -1,5 +1,4 @@
 import {
-  HEAD_TRANSITION_CONTRACT_VERSION,
   validateHeadTransitionDecision,
   validateHeadTransitionDeliveryReceipt,
   validateHeadTransitionInboundEvent,
@@ -125,7 +124,7 @@ export function replayHeadTransitionLedger(
       snapshot.duplicateEventCount++;
       continue;
     }
-    target.set(event.idempotencyKey, event.payload);
+    target.set(event.idempotencyKey, event.payload as never);
   }
 
   return snapshot;
