@@ -119,7 +119,15 @@ const config = {
   ],
   // Keep only build artifacts out of the full-tree export audit. In
   // particular, do not inherit production's test-support exclusions.
-  ignore: ["dist/**", "packages/*/dist/**", "**/.boundary-stubs/**"],
+  ignore: [
+    "dist/**",
+    "packages/*/dist/**",
+    "**/.boundary-stubs/**",
+    // langgraph-head-transition-v01 spike: public contract surface for a
+    // follow-up integration PR, not yet consumed beyond its own tests. See
+    // the matching entry in knip.config.ts.
+    "src/head-transition/**",
+  ],
   // This fixture deliberately mixes used, aliased, and unused exports so the
   // topology analyzer can prove each classification.
   ignoreIssues: {
