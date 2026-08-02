@@ -1,6 +1,6 @@
 export const HEAD_TRANSITION_CONTRACT_VERSION = 1 as const;
 
-export type HeadTransitionChannel = "discord" | "gateway" | "device" | "cron" | "unknown";
+type HeadTransitionChannel = "discord" | "gateway" | "device" | "cron" | "unknown";
 
 export type HeadTransitionInboundEvent = {
   version: typeof HEAD_TRANSITION_CONTRACT_VERSION;

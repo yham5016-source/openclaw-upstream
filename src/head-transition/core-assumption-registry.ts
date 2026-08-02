@@ -6,11 +6,11 @@ import type { DatabaseSync } from "node:sqlite";
 import { DatabaseSync as NodeSqliteDatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 
-export type CoreAssumptionKind = "causal" | "constraint" | "environment" | "data" | "method";
-export type CoreAssumptionStatus = "proposed" | "active" | "challenged" | "retired" | "superseded";
-export type CoreAssumptionScopeType = "task" | "project" | "global";
+type CoreAssumptionKind = "causal" | "constraint" | "environment" | "data" | "method";
+type CoreAssumptionStatus = "proposed" | "active" | "challenged" | "retired" | "superseded";
+type CoreAssumptionScopeType = "task" | "project" | "global";
 
-export interface CoreAssumptionRecord {
+interface CoreAssumptionRecord {
   assumptionId: string;
   scopeType: CoreAssumptionScopeType;
   scopeId: string;
@@ -117,7 +117,7 @@ export function openCoreAssumptionRegistry(location: string): DatabaseSync {
   return db;
 }
 
-export interface RegistryMeta {
+interface RegistryMeta {
   normalizationVersion: number;
 }
 
@@ -152,9 +152,7 @@ export interface RegisterCoreAssumptionInput {
   supersedesId?: string;
 }
 
-export type RegisterOutcome =
-  | { ok: true; record: CoreAssumptionRecord }
-  | { ok: false; reason: string };
+type RegisterOutcome = { ok: true; record: CoreAssumptionRecord } | { ok: false; reason: string };
 
 /**
  * Register one assumption under the registry's current normalization_version
@@ -252,7 +250,7 @@ export function registerCoreAssumption(
   }
 }
 
-export type MigrationOutcome = { ok: true; migratedCount: number } | { ok: false; reason: string };
+type MigrationOutcome = { ok: true; migratedCount: number } | { ok: false; reason: string };
 
 /**
  * Re-normalize and re-hash every row for one (scopeType, scopeId) under a

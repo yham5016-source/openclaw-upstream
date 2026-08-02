@@ -21,28 +21,28 @@ export const CAVEMAN_PAYLOAD_SCHEMA_VERSIONS = {
   "generic_result.v1": "1",
 } as const;
 
-export type CavemanPayloadSchema = keyof typeof CAVEMAN_PAYLOAD_SCHEMA_VERSIONS;
+type CavemanPayloadSchema = keyof typeof CAVEMAN_PAYLOAD_SCHEMA_VERSIONS;
 
-export interface CodeResultPayload {
+interface CodeResultPayload {
   schema: "code_result.v1";
   filesChanged: string[];
   diffSummary: string;
   testResults?: { passed: number; failed: number };
 }
 
-export interface ResearchResultPayload {
+interface ResearchResultPayload {
   schema: "research_result.v1";
   findings: string[];
   sources: string[];
 }
 
-export interface ReviewResultPayload {
+interface ReviewResultPayload {
   schema: "review_result.v1";
   verdict: "approve" | "request_changes" | "block";
   findings: string[];
 }
 
-export interface DeviceResultPayload {
+interface DeviceResultPayload {
   schema: "device_result.v1";
   deviceId: string;
   actionTaken: string;
@@ -54,7 +54,7 @@ export interface DeviceResultPayload {
  * CAVEMAN_GENERIC_PAYLOAD_SCHEMA's status restriction in caveman-envelope.ts
  * and the budget-extension gate in progress-grade.ts.
  */
-export interface GenericResultPayload {
+interface GenericResultPayload {
   schema: "generic_result.v1";
   note: string;
 }

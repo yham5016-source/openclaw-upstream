@@ -7,26 +7,26 @@ import { CAVEMAN_GENERIC_PAYLOAD_SCHEMA } from "./caveman-envelope.js";
  * grade-3 derivation is always `provisional: true` and never counts as a
  * stop condition, budget/credit extension, or same_failure_confirmation.
  */
-export type ProgressGrade = 1 | 2 | 3 | 4;
+type ProgressGrade = 1 | 2 | 3 | 4;
 
-export interface GradeDerivation {
+interface GradeDerivation {
   grade: ProgressGrade;
   provisional: boolean;
 }
 
-export type IndependenceAxisStrong =
+type IndependenceAxisStrong =
   | "source_lineage"
   | "data_partition"
   | "verification_method"
   | "toolchain";
 
-export type IndependenceAxisWeak =
+type IndependenceAxisWeak =
   | "model_provider"
   | "prompt_context"
   | "sampling_path"
   | "evaluator_instance";
 
-export type IndependenceAxis = IndependenceAxisStrong | IndependenceAxisWeak;
+type IndependenceAxis = IndependenceAxisStrong | IndependenceAxisWeak;
 
 const STRONG_AXES = new Set<IndependenceAxis>([
   "source_lineage",
@@ -45,7 +45,7 @@ export function isIndependentEvidence(differingAxes: IndependenceAxis[]): boolea
   return distinctAxes.size >= 2;
 }
 
-export interface VerifierResult {
+interface VerifierResult {
   independenceAxes: IndependenceAxis[];
 }
 
@@ -79,7 +79,7 @@ function qualifiesForFullCreditRestore(derivation: GradeDerivation): boolean {
   return !derivation.provisional && (derivation.grade === 1 || derivation.grade === 2);
 }
 
-export interface BudgetExtensionInput {
+interface BudgetExtensionInput {
   payloadSchema: string;
   grade: GradeDerivation;
 }

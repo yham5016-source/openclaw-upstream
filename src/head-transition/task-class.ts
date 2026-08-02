@@ -3,7 +3,7 @@
  * allocation, and is frozen at lineage start — a run cannot re-classify
  * itself upward mid-flight to unlock a larger budget.
  */
-export type TaskClass = "simple_query" | "code_change" | "investigation" | "high_risk_action";
+type TaskClass = "simple_query" | "code_change" | "investigation" | "high_risk_action";
 
 export interface TaskSignals {
   /** external send/delete/deploy/payment/permission change, any irreversible execution */
@@ -30,7 +30,7 @@ export function classifyTask(signals: TaskSignals): TaskClass {
   return "simple_query";
 }
 
-export interface TaskBudget {
+interface TaskBudget {
   maxTokens: number;
   maxWallSeconds: number;
   maxCostUsd: number;
@@ -74,7 +74,7 @@ export const TASK_BUDGETS: Record<TaskClass, TaskBudget> = {
   },
 };
 
-export interface TaskUsage {
+interface TaskUsage {
   tokens: number;
   wallSeconds: number;
   costUsd: number;
@@ -82,7 +82,7 @@ export interface TaskUsage {
   strategySwitches: number;
 }
 
-export interface BudgetCheck {
+interface BudgetCheck {
   withinBudget: boolean;
   violations: string[];
 }
@@ -99,7 +99,7 @@ export function checkBudget(taskClass: TaskClass, usage: TaskUsage): BudgetCheck
   return { withinBudget: violations.length === 0, violations };
 }
 
-export interface TaskClassLineageRegistry {
+interface TaskClassLineageRegistry {
   /** First classification for a lineageId wins; later calls return the frozen class. */
   classify(lineageId: string, signals: TaskSignals): TaskClass;
 }

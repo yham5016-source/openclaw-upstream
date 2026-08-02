@@ -34,7 +34,8 @@ export function buildHeadTransitionDiscordInboundEvent(
     sessionKey: ctx.route.sessionKey,
     messageId,
     senderId: ctx.sender.id,
-    occurredAtMs: Date.parse(ctx.message.timestamp),
+    // A missing timestamp parses to NaN, which the contract validator rejects below.
+    occurredAtMs: Date.parse(ctx.message.timestamp ?? ""),
     body: ctx.messageText || ctx.baseText,
     metadata: {
       agentId: ctx.route.agentId,

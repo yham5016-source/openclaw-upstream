@@ -101,7 +101,7 @@ export function replayHeadTransitionLedgerSqlite(db: DatabaseSync): HeadTransiti
     }
     // The idempotency_key primary key already guarantees no duplicate rows
     // exist in storage, so duplicateEventCount stays 0 for this backend.
-    targetMapForKind(snapshot, entry.kind).set(entry.idempotencyKey, entry.payload as never);
+    targetMapForKind(snapshot, entry.kind).set(entry.idempotencyKey, entry.payload);
   }
 
   return snapshot;

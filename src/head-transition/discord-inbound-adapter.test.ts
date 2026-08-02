@@ -25,7 +25,7 @@ describe("buildHeadTransitionDiscordInboundEvent", () => {
       sender: {
         id: "user-1",
       },
-    } as Pick<
+    } as unknown as Pick<
       DiscordMessagePreflightContext,
       | "accountId"
       | "baseText"
@@ -86,7 +86,39 @@ describe("buildHeadTransitionDiscordInboundEvent", () => {
         sender: {
           id: "user-1",
         },
-      } as Pick<
+      } as unknown as Pick<
+        DiscordMessagePreflightContext,
+        | "accountId"
+        | "baseText"
+        | "inboundEventKind"
+        | "message"
+        | "messageChannelId"
+        | "messageText"
+        | "route"
+        | "sender"
+      >),
+    ).toThrow("occurredAtMs must be a non-negative finite number");
+  });
+
+  it("fails closed when Discord omits the message timestamp entirely", () => {
+    expect(() =>
+      buildHeadTransitionDiscordInboundEvent({
+        accountId: "default",
+        baseText: "raw text",
+        inboundEventKind: "message",
+        message: {
+          id: "message-1",
+        },
+        messageChannelId: "channel-1",
+        messageText: "normalized text",
+        route: {
+          agentId: "main",
+          sessionKey: "agent:main:discord:default:channel:channel-1",
+        },
+        sender: {
+          id: "user-1",
+        },
+      } as unknown as Pick<
         DiscordMessagePreflightContext,
         | "accountId"
         | "baseText"

@@ -10,22 +10,22 @@ export const CAVEMAN_GENERIC_PAYLOAD_SCHEMA = "generic_result.v1";
 /** Statuses a generic_result.v1 payload may carry — never a completion claim. */
 const GENERIC_PAYLOAD_ALLOWED_STATUSES = new Set(["blocked", "partial"]);
 
-export type CavemanEnvelopeStatus = "ok" | "partial" | "failed" | "blocked" | "cancelled";
+type CavemanEnvelopeStatus = "ok" | "partial" | "failed" | "blocked" | "cancelled";
 
-export type ContractExceptionType =
+type ContractExceptionType =
   | "needs_clarification"
   | "schema_mismatch"
   | "out_of_scope_finding"
   | "assumption_violation"
   | "novel_observation";
 
-export interface ContractException {
+interface ContractException {
   type: ContractExceptionType;
   detail: string;
   raisedAtMs: number;
 }
 
-export interface ResourceUsage {
+interface ResourceUsage {
   tokens: number;
   wallSeconds: number;
   costUsd: number;
@@ -45,7 +45,7 @@ export interface CavemanEnvelope<TPayload> {
 }
 
 export type ValidationResult = { ok: true } | { ok: false; reason: string };
-export type PayloadValidator = (payload: unknown) => ValidationResult;
+type PayloadValidator = (payload: unknown) => ValidationResult;
 
 export type RecordLike = Record<string, unknown>;
 
@@ -167,7 +167,7 @@ export function stringField(value: unknown, field: string): ValidationResult {
   return typeof value === "string" ? valid() : invalid(`${field} must be a string`);
 }
 
-export function finiteNumber(value: unknown, field: string): ValidationResult {
+function finiteNumber(value: unknown, field: string): ValidationResult {
   return typeof value === "number" && Number.isFinite(value)
     ? valid()
     : invalid(`${field} must be a finite number`);

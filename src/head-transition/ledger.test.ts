@@ -246,7 +246,9 @@ describe("replayHeadTransitionLedger", () => {
       kind: "inbound_event",
       idempotencyKey: "evt-bad",
       recordedAtMs: 1,
-      payload: { ...makeInbound("evt-bad"), version: 999 },
+      // Stands in for a corrupt stored row: a bad version reaches replay from
+      // storage, where the type system cannot reject it, so validation must.
+      payload: { ...makeInbound("evt-bad"), version: 999 } as unknown as HeadTransitionInboundEvent,
     };
 
     expect(() => replayHeadTransitionLedger([badEntry])).toThrow("replay validation failure");

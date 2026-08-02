@@ -1,5 +1,4 @@
 import {
-  HEAD_TRANSITION_CONTRACT_VERSION,
   validateHeadTransitionDecision,
   validateHeadTransitionDeliveryReceipt,
   validateHeadTransitionInboundEvent,
@@ -175,7 +174,7 @@ function validatePayload(entry: HeadTransitionLedgerEntry): ValidationResult {
 }
 
 /** Exported so alternate ledger backends can enforce the same key-match rule. */
-export function payloadKeyForEntry(entry: HeadTransitionLedgerEntry): string {
+function payloadKeyForEntry(entry: HeadTransitionLedgerEntry): string {
   if (entry.kind === "worker_result") {
     return `${entry.payload.commandIdempotencyKey}:${entry.payload.workerId}`;
   }
@@ -186,12 +185,7 @@ export function payloadKeyForEntry(entry: HeadTransitionLedgerEntry): string {
 export function targetMapForKind(
   snapshot: HeadTransitionLedgerSnapshot,
   kind: HeadTransitionLedgerEntryKind,
-):
-  | Map<string, HeadTransitionInboundEvent>
-  | Map<string, HeadTransitionDecision>
-  | Map<string, HeadTransitionWorkerCommand>
-  | Map<string, HeadTransitionWorkerResult>
-  | Map<string, HeadTransitionDeliveryReceipt> {
+): Map<string, HeadTransitionLedgerEntry["payload"]> {
   switch (kind) {
     case "inbound_event":
       return snapshot.inboundEvents;
