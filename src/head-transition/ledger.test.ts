@@ -246,7 +246,7 @@ describe("replayHeadTransitionLedger", () => {
       kind: "inbound_event",
       idempotencyKey: "evt-bad",
       recordedAtMs: 1,
-      payload: { ...makeInbound("evt-bad"), version: 999 },
+      payload: { ...makeInbound("evt-bad"), version: 999 as never },
     };
 
     expect(() => replayHeadTransitionLedger([badEntry])).toThrow("replay validation failure");
