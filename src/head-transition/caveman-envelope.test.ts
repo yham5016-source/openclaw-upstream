@@ -41,19 +41,25 @@ describe("validateCavemanEnvelope", () => {
       acceptAnyPayload,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("status");
+    if (!result.ok) {
+      expect(result.reason).toContain("status");
+    }
   });
 
   it("rejects a missing taskId", () => {
     const result = validateCavemanEnvelope(makeEnvelope({ taskId: "" }), acceptAnyPayload);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("taskId");
+    if (!result.ok) {
+      expect(result.reason).toContain("taskId");
+    }
   });
 
   it("rejects a missing producer", () => {
     const result = validateCavemanEnvelope(makeEnvelope({ producer: "" }), acceptAnyPayload);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("producer");
+    if (!result.ok) {
+      expect(result.reason).toContain("producer");
+    }
   });
 
   it("rejects evidenceRefs that is not a string array", () => {
@@ -62,7 +68,9 @@ describe("validateCavemanEnvelope", () => {
       acceptAnyPayload,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("evidenceRefs");
+    if (!result.ok) {
+      expect(result.reason).toContain("evidenceRefs");
+    }
   });
 
   it("rejects an exception with an unknown type", () => {
@@ -73,7 +81,9 @@ describe("validateCavemanEnvelope", () => {
       acceptAnyPayload,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("exceptions");
+    if (!result.ok) {
+      expect(result.reason).toContain("exceptions");
+    }
   });
 
   it("accepts each of the five known exception types", () => {
@@ -99,14 +109,18 @@ describe("validateCavemanEnvelope", () => {
       acceptAnyPayload,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("resourceUsage");
+    if (!result.ok) {
+      expect(result.reason).toContain("resourceUsage");
+    }
   });
 
   it("delegates payload validation and surfaces a payload failure", () => {
     const rejectPayload = () => ({ ok: false as const, reason: "payload rejected by delegate" });
     const result = validateCavemanEnvelope(makeEnvelope(), rejectPayload);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("payload rejected by delegate");
+    if (!result.ok) {
+      expect(result.reason).toContain("payload rejected by delegate");
+    }
   });
 
   it(`rejects a ${CAVEMAN_GENERIC_PAYLOAD_SCHEMA} payload with status ok`, () => {
@@ -118,7 +132,9 @@ describe("validateCavemanEnvelope", () => {
       acceptAnyPayload,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain(CAVEMAN_GENERIC_PAYLOAD_SCHEMA);
+    if (!result.ok) {
+      expect(result.reason).toContain(CAVEMAN_GENERIC_PAYLOAD_SCHEMA);
+    }
   });
 
   it(`rejects a ${CAVEMAN_GENERIC_PAYLOAD_SCHEMA} payload with status failed`, () => {

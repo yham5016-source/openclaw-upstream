@@ -170,6 +170,10 @@ function validatePayload(entry: HeadTransitionLedgerEntry): ValidationResult {
       return validateHeadTransitionWorkerResult(entry.payload);
     case "delivery_receipt":
       return validateHeadTransitionDeliveryReceipt(entry.payload);
+    default: {
+      const exhaustive: never = entry;
+      throw new Error(`unhandled ledger entry: ${JSON.stringify(exhaustive)}`);
+    }
   }
 }
 
@@ -202,6 +206,10 @@ export function targetMapForKind(
       return snapshot.workerResults;
     case "delivery_receipt":
       return snapshot.deliveryReceipts;
+    default: {
+      const exhaustive: never = kind;
+      throw new Error(`unhandled ledger entry kind: ${String(exhaustive)}`);
+    }
   }
 }
 

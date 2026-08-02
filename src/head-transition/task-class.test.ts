@@ -53,7 +53,7 @@ describe("TASK_BUDGETS — v0.1 resolved numbers (ASC §9)", () => {
     expect(TASK_BUDGETS.code_change).toEqual({
       maxTokens: 64000,
       maxWallSeconds: 900,
-      maxCostUsd: 2.0,
+      maxCostUsd: 2,
       maxToolCalls: 40,
       maxStrategySwitches: 2,
     });
@@ -63,7 +63,7 @@ describe("TASK_BUDGETS — v0.1 resolved numbers (ASC §9)", () => {
     expect(TASK_BUDGETS.investigation).toEqual({
       maxTokens: 96000,
       maxWallSeconds: 1500,
-      maxCostUsd: 3.0,
+      maxCostUsd: 3,
       maxToolCalls: 30,
       maxStrategySwitches: 4,
     });

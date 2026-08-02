@@ -73,7 +73,9 @@ describe("openCoreAssumptionRegistry / registerCoreAssumption", () => {
       baseInput({ assumptionId: "ca_2", canonicalStatement: "the api rate limit is 100 req/min" }),
     );
     expect(second.ok).toBe(false);
-    if (!second.ok) expect(second.reason).toContain("duplicate");
+    if (!second.ok) {
+      expect(second.reason).toContain("duplicate");
+    }
   });
 
   it("allows the same statement text under a different scopeId", () => {
@@ -99,7 +101,9 @@ describe("openCoreAssumptionRegistry / registerCoreAssumption", () => {
       }),
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason.toLowerCase()).toContain("version");
+    if (!result.ok) {
+      expect(result.reason.toLowerCase()).toContain("version");
+    }
     // Rejection must not have mutated registry state.
     expect(readRegistryMeta(db, "project", "proj-1")).toEqual({ normalizationVersion: 1 });
   });
@@ -147,7 +151,9 @@ describe("migrateNormalizationVersion", () => {
       normalizeAssumptionText,
     );
     expect(migration.ok).toBe(true);
-    if (migration.ok) expect(migration.migratedCount).toBe(1);
+    if (migration.ok) {
+      expect(migration.migratedCount).toBe(1);
+    }
     expect(readRegistryMeta(db, "project", "proj-1")).toEqual({ normalizationVersion: 2 });
 
     // A write under the old version is now rejected; under the new version it succeeds.
@@ -187,7 +193,9 @@ describe("migrateNormalizationVersion", () => {
       normalizeAssumptionText,
     );
     expect(migration.ok).toBe(false);
-    if (!migration.ok) expect(migration.reason).toContain("collision");
+    if (!migration.ok) {
+      expect(migration.reason).toContain("collision");
+    }
 
     // Full rollback: registry_meta and both rows must be exactly as before the attempt.
     expect(readRegistryMeta(db, "project", "proj-1")).toEqual({ normalizationVersion: 1 });

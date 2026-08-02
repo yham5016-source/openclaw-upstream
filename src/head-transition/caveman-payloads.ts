@@ -86,6 +86,10 @@ export function validateCavemanTaskPayload(value: unknown): ValidationResult {
       return validateDeviceResultPayload(record);
     case "generic_result.v1":
       return validateGenericResultPayload(record);
+    default: {
+      const exhaustive: never = schema;
+      throw new Error(`unhandled Caveman payload schema: ${String(exhaustive)}`);
+    }
   }
 }
 

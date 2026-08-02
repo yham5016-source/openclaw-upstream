@@ -52,14 +52,14 @@ export const TASK_BUDGETS: Record<TaskClass, TaskBudget> = {
   code_change: {
     maxTokens: 64000,
     maxWallSeconds: 900,
-    maxCostUsd: 2.0,
+    maxCostUsd: 2,
     maxToolCalls: 40,
     maxStrategySwitches: 2,
   },
   investigation: {
     maxTokens: 96000,
     maxWallSeconds: 1500,
-    maxCostUsd: 3.0,
+    maxCostUsd: 3,
     maxToolCalls: 30,
     maxStrategySwitches: 4,
   },
@@ -91,11 +91,21 @@ export interface BudgetCheck {
 export function checkBudget(taskClass: TaskClass, usage: TaskUsage): BudgetCheck {
   const budget = TASK_BUDGETS[taskClass];
   const violations: string[] = [];
-  if (usage.tokens > budget.maxTokens) violations.push("tokens");
-  if (usage.wallSeconds > budget.maxWallSeconds) violations.push("wallSeconds");
-  if (usage.costUsd > budget.maxCostUsd) violations.push("costUsd");
-  if (usage.toolCalls > budget.maxToolCalls) violations.push("toolCalls");
-  if (usage.strategySwitches > budget.maxStrategySwitches) violations.push("strategySwitches");
+  if (usage.tokens > budget.maxTokens) {
+    violations.push("tokens");
+  }
+  if (usage.wallSeconds > budget.maxWallSeconds) {
+    violations.push("wallSeconds");
+  }
+  if (usage.costUsd > budget.maxCostUsd) {
+    violations.push("costUsd");
+  }
+  if (usage.toolCalls > budget.maxToolCalls) {
+    violations.push("toolCalls");
+  }
+  if (usage.strategySwitches > budget.maxStrategySwitches) {
+    violations.push("strategySwitches");
+  }
   return { withinBudget: violations.length === 0, violations };
 }
 

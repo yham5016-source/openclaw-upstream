@@ -136,7 +136,7 @@ export function readRegistryMeta(
       .limit(1),
   ).rows;
   const [row] = rows;
-  return row ? { normalizationVersion: Number(row.normalization_version) } : null;
+  return row ? { normalizationVersion: row.normalization_version } : null;
 }
 
 export interface RegisterCoreAssumptionInput {

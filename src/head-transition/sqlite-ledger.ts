@@ -121,7 +121,7 @@ export function ledgerHasSeenSqlite(db: DatabaseSync, idempotencyKey: string): b
 }
 
 function rowToLedgerEntry(row: HeadTransitionLedgerRow): HeadTransitionLedgerEntry {
-  const base = { idempotencyKey: row.idempotency_key, recordedAtMs: Number(row.recorded_at_ms) };
+  const base = { idempotencyKey: row.idempotency_key, recordedAtMs: row.recorded_at_ms };
   const payload: unknown = JSON.parse(row.payload);
   switch (row.kind) {
     case "inbound_event":
@@ -134,5 +134,9 @@ function rowToLedgerEntry(row: HeadTransitionLedgerRow): HeadTransitionLedgerEnt
       return { ...base, kind: "worker_result", payload } as HeadTransitionLedgerEntry;
     case "delivery_receipt":
       return { ...base, kind: "delivery_receipt", payload } as HeadTransitionLedgerEntry;
+    default: {
+      const exhaustive: never = row.kind;
+      throw new Error(`unhandled ledger row kind: ${String(exhaustive)}`);
+    }
   }
 }

@@ -59,7 +59,9 @@ describe("validateCavemanTaskPayload", () => {
   it("rejects an unknown schema", () => {
     const result = validateCavemanTaskPayload({ schema: "made_up.v1" });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("schema");
+    if (!result.ok) {
+      expect(result.reason).toContain("schema");
+    }
   });
 
   for (const [schema, payload] of Object.entries(validPayloads)) {
@@ -75,7 +77,9 @@ describe("validateCavemanTaskPayload", () => {
       diffSummary: "x",
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("filesChanged");
+    if (!result.ok) {
+      expect(result.reason).toContain("filesChanged");
+    }
   });
 
   it("rejects research_result.v1 missing sources", () => {
@@ -84,7 +88,9 @@ describe("validateCavemanTaskPayload", () => {
       findings: ["a"],
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("sources");
+    if (!result.ok) {
+      expect(result.reason).toContain("sources");
+    }
   });
 
   it("rejects review_result.v1 with an unknown verdict", () => {
@@ -94,7 +100,9 @@ describe("validateCavemanTaskPayload", () => {
       findings: [],
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("verdict");
+    if (!result.ok) {
+      expect(result.reason).toContain("verdict");
+    }
   });
 
   it("rejects device_result.v1 missing deviceId", () => {
@@ -104,13 +112,17 @@ describe("validateCavemanTaskPayload", () => {
       observedState: {},
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("deviceId");
+    if (!result.ok) {
+      expect(result.reason).toContain("deviceId");
+    }
   });
 
   it("rejects generic_result.v1 missing note", () => {
     const result = validateCavemanTaskPayload({ schema: "generic_result.v1" });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("note");
+    if (!result.ok) {
+      expect(result.reason).toContain("note");
+    }
   });
 });
 
@@ -137,7 +149,9 @@ describe("validateCavemanEnvelopeWithTaskPayload (schema/version mismatch gate)"
     const envelope = baseEnvelope(validPayloads["code_result.v1"], { schemaVersion: "2" });
     const result = validateCavemanEnvelopeWithTaskPayload(envelope);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason.toLowerCase()).toContain("version");
+    if (!result.ok) {
+      expect(result.reason.toLowerCase()).toContain("version");
+    }
   });
 
   it("rejects an envelope whose schema field disagrees with the payload's own schema field", () => {

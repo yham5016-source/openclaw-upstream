@@ -4,7 +4,6 @@ import {
   type HeadTransitionDecision,
   type HeadTransitionDeliveryReceipt,
   type HeadTransitionInboundEvent,
-  type HeadTransitionWorkerCommand,
   type HeadTransitionWorkerResult,
 } from "./contracts.js";
 import {
@@ -38,17 +37,6 @@ function makeDecision(key: string): HeadTransitionDecision {
     sessionKey: "agent:main:discord:default:channel:channel-1",
     status: "reply",
     replyText: "ack",
-  };
-}
-
-function makeWorkerCommand(key: string): HeadTransitionWorkerCommand {
-  return {
-    version: HEAD_TRANSITION_CONTRACT_VERSION,
-    idempotencyKey: key,
-    workerId: "glm",
-    kind: "code",
-    body: "run tests",
-    leaseExpiresAtMs: 100,
   };
 }
 
